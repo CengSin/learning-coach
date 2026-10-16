@@ -1,0 +1,4 @@
+interface:
+  display_name: "学习教练"
+  short_description: "从资料目录建立课程，按真实作答推进教学，控制时间并保存可追溯的进度与错题"
+  default_prompt: "使用 $learning-coach 接续当前课程，先检查资料、进度和计时，再完成本次学习与记录。"

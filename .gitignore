@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+
+# 技能写文件时的临时文件
+.writing-*
+
+# 系统与编辑器
+.DS_Store
+.idea/
+.vscode/
+
+# 密钥与本地环境
+.env
+.env.*
+*.pem
