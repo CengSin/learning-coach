@@ -22,6 +22,19 @@
 - catalogue：schema_version、sources。每个来源有 sha256、page_count、toc_pdf_pages、toc、verified_ranges、pending、ocr，可选 parsed（directory、status、manifest）。toc 条目保留 title、printed_start、pdf_start（未知为 null）、verified；目录已读与正文未读分开。
 - questions：schema_version、items。id 唯一；provenance、source、answer_source、verification、knowledge_ids、exposure 必须明确。批次未知不推造。
 
+### 教学校验的兼容扩展
+
+字段和资格详见 [accuracy.md](accuracy.md)，保留现有 schema_version，采用可缺省的新增字段：
+
+- next_session.key_facts、progress.pending_checks：每项 content、basis、location，仅需关联时加 id；前者备课、后者保留课后待查事实。next_session.connections：每项 prior_knowledge、similarities、limits，无合适关联可空列。
+- questions.items[].independent_check：仅 method、result；方法“工具复算”或“另一种解法”（可用中文冒号附说明），结果“一致”“不一致”或“待核对”。改变答案相关条件的改编题用 adapted=true。
+- 新 evidence_history 事件和新 mistakes 带 assessment：mode、without_explanation，题目作答另填 question_ids；闭卷复述用 recall_gaps 列遗漏或错误的关键事实，不存长文本。既有 summary 简写结果，纯复述无题目时不要求关联 ID。
+- 只在新错题或 reasonable_disagreement=true 的合理分歧记录中要求 assessment.grading_check，字段仅 method、result。普通批改不要求此记录。
+
+缺 assessment 的事件和错题为历史记录，展示“历史记录，未按新规则核验”；不批量补字段、不改原结论，也不改变原复习队列、到期日期和复查状态。旧资料中的笼统验算说明不能自动转换为复算记录。后续实际复查再追加符合新规则的事件即可接入，无需批量迁移。
+
+新记录缺资格时保留练习事实，不替换已有有效或历史结论。掌握依据构成只对新规则下有效实际作答关联的题目去重统计，纯讲解、历史未核验和无复算资格的自编练习不入分母；空样本显示“无可统计依据”。
+
 knowledge 不再用一个自由文本状态覆盖各类证据。向 evidence_history 追加事件，字段为 id、dimension、status、date、summary、source；id 在该知识点内唯一，date 为项目时区的 YYYY-MM-DD，source 指向存在的真实记录。维度与状态：
 
 | dimension | status |

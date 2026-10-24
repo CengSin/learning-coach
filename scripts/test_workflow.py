@@ -15,7 +15,8 @@ from unittest.mock import patch
 from common import read_json, write_json, write_text
 from pdf_pages import selected_pages
 from scan_materials import scan_materials
-from knowledge import knowledge_view, migrate_knowledge, validate_knowledge
+from knowledge import (HISTORY_NOTICE, accuracy_report, assessment_state, independently_checked,
+                       knowledge_view, mastery_basis, migrate_knowledge, pending_facts, validate_knowledge)
 from render import heatmap, initialize, render_outputs, review_schedule, snapshot_period
 from session_clock import archive_finished, check_daily_budget, elapsed, snapshot, transition
 from validate import validate
@@ -410,6 +411,274 @@ class WorkflowTests(unittest.TestCase):
             self.assertEqual(course["skill_path"], ".agents/skills/自定义位置/SKILL.md")
             self.assertIn(".agents/skills/自定义位置/scripts/render.py", (root / "学习上下文.md").read_text())
             subprocess.run([sys.executable, "-B", str(relocated / "scripts/validate.py"), "--root", str(root)], check=True, capture_output=True, text=True)
+
+
+class AccuracyTests(unittest.TestCase):
+    def question(self, question_id="q1", provenance="自编", check=None):
+        result = {"id": question_id, "provenance": provenance, "source": "record.md",
+                  "answer_source": "夹具参考答案", "verification": "测试夹具",
+                  "knowledge_ids": ["k1"], "exposure": {"answered": True}}
+        if check is not None:
+            result["independent_check"] = check
+        return result
+
+    def event(self, event_id="e1", question_ids=None, **assessment):
+        return {"id": event_id, "dimension": "作答", "status": "独立正确", "date": "2026-10-16",
+                "summary": "用户自行完成", "source": "record.md",
+                "assessment": {"mode": "独立作答", "without_explanation": True,
+                               "question_ids": ["q1"] if question_ids is None else question_ids, **assessment}}
+
+    def progress(self, *events):
+        return {"knowledge": [{"id": "k1", "title": "知识点一", "evidence_history": list(events),
+                               "review_status": "已安排"}],
+                "mistakes": [], "next_session": {"key_facts": [], "connections": []}}
+
+    def codes(self, progress, questions):
+        return {warning["code"] for warning in accuracy_report(progress, questions)["warnings"]}
+
+    def test_historical_answers_keep_due_reviews_and_queue(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            initialize(root, "通用课程", "测试历史兼容", "Asia/Shanghai")
+            write_text(root / "record.md", "历史学习记录的测试夹具")
+            course = read_json(root, "data/course.json")
+            progress = read_json(root, "data/progress.json")
+            event = self.event()
+            event.pop("assessment")
+            progress["knowledge"] = self.progress(event)["knowledge"]
+            progress["review_queue"] = [{"title": "先复查", "evidence": "原证据", "next_check": "下一次先做", "due": "2026-10-17"},
+                                        {"title": "后复查", "evidence": "另一原证据", "next_check": "再做", "due": "2026-10-18"}]
+            progress["periods"] = [{"id": "p1", "start": "2026-10-12", "end": "2026-10-18",
+                                    "status": "待复盘", "planned_learning_dates": ["2026-10-16"], "review_plan": ["原复习安排"]}]
+            progress["mistakes"] = [{"id": "m1", "date": "2026-10-16", "original": "历史原答",
+                                     "correction": "历史订正", "review_status": "待复查", "evidence": "record.md"}]
+            write_json(root, "data/progress.json", progress)
+            write_json(root, "data/questions.json", {"items": [self.question()]})
+            before = copy.deepcopy(progress)
+            files = {path.relative_to(root): path.read_bytes() for path in root.rglob("*") if path.is_file()}
+            due = review_schedule(course, progress)
+            outputs = render_outputs(root)
+            report = validate(root, check_generated=False)
+            view = knowledge_view(progress["knowledge"][0])
+            self.assertTrue(report["ok"], report)
+            self.assertIn(HISTORY_NOTICE, view["status"])
+            self.assertIn("独立正确", view["status"])
+            self.assertEqual(view["review_status"], "已安排")
+            self.assertIn(HISTORY_NOTICE, outputs["index.html"])
+            self.assertIn(HISTORY_NOTICE, outputs["review.html"])
+            self.assertLess(outputs["review.html"].index("先复查"), outputs["review.html"].index("后复查"))
+            self.assertIn("原复习安排", outputs["review.html"])
+            self.assertEqual(review_schedule(course, progress), due)
+            self.assertEqual(progress, before)
+            self.assertEqual(files, {path.relative_to(root): path.read_bytes() for path in root.rglob("*") if path.is_file()})
+            self.assertEqual(report["mastery_basis"]["summary"], "无可统计依据")
+            self.assertNotIn("UNCHECKED_SELF_AUTHORED", {w["code"] for w in report["accuracy_warnings"]})
+            checked_question = self.question(check={"method": "另一种解法", "result": "一致"})
+            self.assertEqual(mastery_basis(progress, [checked_question])["denominator"], 0)
+
+    def test_self_authored_requires_minimal_independent_check(self):
+        progress = self.progress(self.event())
+        question = self.question()
+        self.assertIn("UNCHECKED_SELF_AUTHORED", self.codes(progress, [question]))
+        self.assertEqual(mastery_basis(progress, [question])["denominator"], 0)
+        self.assertNotIn("作答：独立正确", knowledge_view(progress["knowledge"][0], {"q1": question})["status"])
+        for method in ("工具复算", "另一种解法：逆向检查"):
+            question["independent_check"] = {"method": method, "result": "一致"}
+            self.assertTrue(independently_checked(question))
+            self.assertEqual(mastery_basis(progress, [question])["denominator"], 1)
+            self.assertNotIn("UNCHECKED_SELF_AUTHORED", self.codes(progress, [question]))
+        for check in (True, {}, {"method": "已检查", "result": "一致"},
+                      {"method": "工具复算", "result": "不一致"}, {"method": "另一种解法", "result": "待核对"},
+                      {"method": "工具复算", "result": True}):
+            with self.subTest(check=check):
+                question["independent_check"] = check
+                self.assertEqual(mastery_basis(progress, [question])["denominator"], 0)
+                self.assertIn("UNCHECKED_SELF_AUTHORED", self.codes(progress, [question]))
+
+    def test_unchecked_practice_does_not_replace_prior_conclusion(self):
+        historical = self.event("old")
+        historical.pop("assessment")
+        current = self.event("new")
+        current["date"] = "2026-10-17"
+        progress = self.progress(historical, current)
+        before = copy.deepcopy(progress)
+        view = knowledge_view(progress["knowledge"][0], {"q1": self.question()})
+        self.assertEqual(view["evidence"], [historical])
+        self.assertEqual(view["practice"], [current])
+        self.assertIn(HISTORY_NOTICE, view["status"])
+        self.assertEqual(view["review_status"], "已安排")
+        self.assertEqual(progress, before)
+
+    def test_grading_recheck_only_for_mistakes_or_reasonable_disagreement(self):
+        question = self.question(provenance="官方公开")
+        event = self.event()
+        progress = self.progress(event)
+        self.assertNotIn("GRADING_RECHECK_MISSING", self.codes(progress, [question]))
+        event["status"] = "未通过"
+        self.assertNotIn("GRADING_RECHECK_MISSING", self.codes(progress, [question]))
+        mistake = {"id": "m1", "assessment": copy.deepcopy(event["assessment"])}
+        progress["mistakes"] = [mistake]
+        self.assertIn("GRADING_RECHECK_MISSING", self.codes(progress, [question]))
+        mistake["assessment"]["grading_check"] = {"method": "重新核对条件", "result": "确认判错"}
+        self.assertNotIn("GRADING_RECHECK_MISSING", self.codes(progress, [question]))
+        progress["mistakes"] = [{"id": "historical-mistake"}]
+        self.assertNotIn("GRADING_RECHECK_MISSING", self.codes(progress, [question]))
+        event["assessment"]["reasonable_disagreement"] = True
+        self.assertIn("GRADING_RECHECK_MISSING", self.codes(progress, [question]))
+        self.assertEqual(mastery_basis(progress, [question])["denominator"], 0)
+        event["assessment"]["grading_check"] = {"method": "另一种解法", "result": "待核对"}
+        self.assertNotIn("GRADING_RECHECK_MISSING", self.codes(progress, [question]))
+        self.assertEqual(mastery_basis(progress, [question])["denominator"], 0)
+        event["assessment"]["grading_check"]["result"] = "接受等价答案"
+        self.assertEqual(mastery_basis(progress, [question])["denominator"], 1)
+
+    def test_new_wrong_self_authored_question_warns_about_both_checks(self):
+        progress = self.progress()
+        progress["mistakes"] = [{"id": "m1", "assessment": self.event()["assessment"]}]
+        self.assertTrue({"UNCHECKED_SELF_AUTHORED", "GRADING_RECHECK_MISSING"} <= self.codes(progress, [self.question()]))
+        progress["mistakes"][0]["assessment"] = None
+        self.assertIn("GRADING_RECHECK_MISSING", self.codes(progress, [self.question()]))
+
+    def test_key_facts_connections_and_minimal_render_fields(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            initialize(root, "通用课程", "测试备课", "Asia/Shanghai")
+            progress = read_json(root, "data/progress.json")
+            plan = progress["next_session"]
+            plan["objectives"] = ["解释关系及边界"]
+            self.assertIn("KEY_FACTS_MISSING", self.codes(progress, []))
+            plan["key_facts"] = [{"content": "关键关系"}, {"content": "关键条件", "basis": "已对照教材原页"}]
+            plan["connections"] = [{"prior_knowledge": "已学关系", "similarities": "结构相似"}]
+            codes = self.codes(progress, [])
+            self.assertTrue({"KEY_FACT_BASIS", "KEY_FACT_LOCATION", "CONNECTION_FIELDS"} <= codes)
+            plan["key_facts"].append({"basis": "推断", "location": "前提待核对"})
+            self.assertIn("KEY_FACT_CONTENT", self.codes(progress, []))
+            plan["key_facts"] = [{"content": "关键关系", "basis": "已对照教材原页", "location": "资料甲第2章"},
+                                  {"content": "未核对条件", "basis": "模型自己的知识，未核对", "location": "待定位"}]
+            plan["connections"][0]["limits"] = "仅结构相似，条件不同"
+            self.assertEqual(self.codes(progress, []), set())
+            write_json(root, "data/progress.json", progress)
+            output = render_outputs(root)
+            for value in ("本次关键事实", "资料甲第2章", "关联既有知识", "仅结构相似，条件不同"):
+                self.assertIn(value, output["records/下次学习小纲.md"])
+            self.assertIn("未核对条件", output["index.html"])
+            self.assertIn("无可统计依据", output["学习上下文.md"])
+
+    def test_pending_facts_survive_outline_replacement(self):
+        old = {"content": "旧待查事实", "basis": "模型自己的知识，未核对", "location": "待定位"}
+        inferred = {"content": "条件推断", "basis": "推断", "location": "前提尚待核对"}
+        progress = self.progress()
+        progress["pending_checks"] = [old]
+        progress["next_session"]["key_facts"] = [old, inferred]
+        self.assertEqual(pending_facts(progress), [old, inferred])
+        progress["next_session"]["key_facts"] = []
+        before = copy.deepcopy(progress)
+        self.assertEqual(pending_facts(progress), [old])
+        self.assertEqual(progress, before)
+
+    def test_mastery_basis_uses_unique_actual_eligible_questions(self):
+        questions = [self.question("self", check={"method": "工具复算", "result": "一致"}),
+                     self.question("official", "官方公开"), self.question("past", "真题"),
+                     self.question("recalled", "回忆"), self.question("unknown", "未知"),
+                     self.question("adapted", "官方公开", {"method": "另一种解法", "result": "一致"}),
+                     self.question("unused"), self.question("unchecked")]
+        questions[5]["adapted"] = True
+        progress = self.progress(*(self.event(question["id"], [question["id"]]) for question in questions[:6]))
+        progress["knowledge"][0]["evidence_history"] += [self.event("duplicate", ["self"]),
+                                                        self.event("practice", ["unchecked"], mode="练习")]
+        result = mastery_basis(progress, questions)
+        self.assertEqual(result["denominator"], 6)
+        self.assertEqual(result["self_authored"], 2)
+        self.assertEqual(result["official_or_past"], 2)
+        self.assertEqual(result["other"], 1)
+        self.assertEqual(result["unknown"], 1)
+        self.assertIn("2/6", result["summary"])
+        self.assertIn("33.3%", result["summary"])
+
+    def test_lecture_visible_explanation_and_practice_are_not_mastery(self):
+        question = self.question(check={"method": "工具复算", "result": "一致"})
+        lecture = self.event("lecture")
+        lecture.update(dimension="讲解", status="已讲解")
+        visible = self.event("visible", without_explanation=False)
+        practice = self.event("practice", mode="练习")
+        progress = self.progress(lecture, visible, practice)
+        result = mastery_basis(progress, [question])
+        self.assertEqual(result["summary"], "无可统计依据")
+        self.assertIsNone(result["self_authored_ratio"])
+        self.assertIn("教学活动，不计掌握依据", knowledge_view(progress["knowledge"][0])["status"])
+
+    def test_closed_book_recall_records_only_gaps_without_a_question(self):
+        event = self.event(question_ids=[], mode="闭卷复述", recall_gaps=["遗漏适用条件", "错误：把类比当等价"])
+        event["status"] = "未通过"
+        event["summary"] = "遗漏条件；混淆边界"
+        progress = self.progress(event)
+        self.assertEqual(self.codes(progress, []), set())
+        self.assertEqual(assessment_state(event), "eligible")
+        self.assertEqual(mastery_basis(progress, [])["summary"], "无可统计依据")
+        event["assessment"]["recall_gaps"] = []
+        event["status"] = "独立正确"
+        event["summary"] = "闭卷复述无遗漏或错误"
+        self.assertEqual(assessment_state(event), "eligible")
+        event["assessment"].pop("recall_gaps")
+        self.assertIn("RECALL_GAPS", self.codes(progress, []))
+        self.assertEqual(assessment_state(event), "practice")
+
+    def test_missing_question_link_does_not_claim_mastery(self):
+        progress = self.progress(self.event(question_ids=["missing"]))
+        self.assertIn("QUESTION_LINK", self.codes(progress, []))
+        self.assertEqual(mastery_basis(progress, [])["denominator"], 0)
+        progress["knowledge"][0]["evidence_history"][0]["assessment"]["question_ids"] = []
+        self.assertIn("QUESTION_LINK", self.codes(progress, []))
+
+    def test_unanswered_or_hinted_result_cannot_claim_independent_mastery(self):
+        question = self.question(provenance="官方公开")
+        progress = self.progress(self.event())
+        question["exposure"]["answered"] = False
+        self.assertIn("QUESTION_LINK", self.codes(progress, [question]))
+        self.assertEqual(mastery_basis(progress, [question])["denominator"], 0)
+        question["exposure"]["answered"] = True
+        event = progress["knowledge"][0]["evidence_history"][0]
+        event["assessment"]["mode"] = "提示后作答"
+        self.assertIn("ASSESSMENT_FIELDS", self.codes(progress, [question]))
+        self.assertEqual(mastery_basis(progress, [question])["denominator"], 0)
+        event["status"] = "提示后正确"
+        self.assertNotIn("ASSESSMENT_FIELDS", self.codes(progress, [question]))
+        self.assertEqual(mastery_basis(progress, [question])["denominator"], 1)
+
+    def test_incomplete_accuracy_fields_warn_without_breaking_render(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            initialize(root, "通用课程", "处理未填字段", "Asia/Shanghai")
+            write_text(root / "record.md", "作答夹具")
+            progress = read_json(root, "data/progress.json")
+            progress["knowledge"] = self.progress(self.event(mode=[]))["knowledge"]
+            progress["next_session"]["key_facts"] = [{"content": "关系", "basis": {}}]
+            progress["next_session"]["connections"] = None
+            write_json(root, "data/progress.json", progress)
+            write_json(root, "data/questions.json", {"items": [self.question()]})
+            report = validate(root, check_generated=False)
+            self.assertTrue(report["ok"], report)
+            self.assertTrue({"KEY_FACT_BASIS", "CONNECTION_FIELDS", "ASSESSMENT_FIELDS"} <=
+                            {warning["code"] for warning in report["accuracy_warnings"]})
+            self.assertIn("待查事实", render_outputs(root)["index.html"])
+    def test_accuracy_cli_validation_is_read_only(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            initialize(root, "通用课程", "完整校验", "Asia/Shanghai")
+            write_text(root / "record.md", "用户实际作答的测试夹具")
+            progress = read_json(root, "data/progress.json")
+            progress["knowledge"] = self.progress(self.event())["knowledge"]
+            write_json(root, "data/progress.json", progress)
+            write_json(root, "data/questions.json", {"items": [self.question(check={"method": "工具复算", "result": "一致"})]})
+            for path, content in render_outputs(root).items():
+                write_text(root / path, content)
+            before = {path.relative_to(root): path.read_bytes() for path in root.rglob("*") if path.is_file()}
+            command = [sys.executable, "-B", str(Path(__file__).with_name("validate.py")), "--root", str(root)]
+            report = json.loads(subprocess.run(command, check=True, capture_output=True, text=True).stdout)
+            self.assertTrue(report["ok"], report)
+            self.assertEqual(report["accuracy_warnings"], [])
+            self.assertEqual(report["mastery_basis"]["self_authored"], 1)
+            self.assertEqual(before, {path.relative_to(root): path.read_bytes() for path in root.rglob("*") if path.is_file()})
 
 
 if __name__ == "__main__":

@@ -11,7 +11,7 @@ from urllib.parse import quote
 from zoneinfo import ZoneInfo
 
 from common import current_time, duration, parse_time, project_path, read_json, write_json, write_text
-from knowledge import knowledge_view, migrate_knowledge
+from knowledge import HISTORY_NOTICE, evidence_label, knowledge_view, mastery_basis, migrate_knowledge, pending_facts
 from session_clock import elapsed, timer_markdown
 
 
@@ -70,33 +70,33 @@ def review_schedule(course, progress):
     return result
 
 
-def knowledge_text(entry):
-    view = knowledge_view(entry)
+def knowledge_text(entry, questions=None):
+    view = knowledge_view(entry, questions)
     parts = [view["status"], "复查：" + view["review_status"]]
     parts += [event["summary"] + "（" + event["date"] + "）" for event in view["evidence"]]
     if view["legacy"]:
         old = view["legacy"]
-        parts.append("保留的历史摘要：" + str(old.get("status", "")) + "。" + str(old.get("evidence", "")) + "（" + str(old.get("last_verified", "未记录")) + "）")
+        parts.append(HISTORY_NOTICE + "；保留的历史摘要：" + str(old.get("status", "")) + "。" + str(old.get("evidence", "")) + "（" + str(old.get("last_verified", "未记录")) + "）")
     elif not view["history"] and entry.get("evidence"):
         parts.append(entry["evidence"])
     return "。".join(parts)
 
 
-def knowledge_rows(entries):
+def knowledge_rows(entries, questions=None):
     rows = []
     for entry in entries:
-        view = knowledge_view(entry)
+        view = knowledge_view(entry, questions)
         evidence = []
         for event in view["evidence"]:
             evidence.append(esc(event["dimension"] + "：" + event["summary"]) + " · " + link(event["source"], event["date"] + " 的记录"))
         if view["history"]:
-            history = ''.join('<li>' + esc(event["date"] + " · " + event["dimension"] + " · " + event["status"] + "：" + event["summary"]) + ' · ' + link(event["source"], "证据") + '</li>' for event in view["history"])
+            history = ''.join('<li>' + esc(event["date"] + " · " + evidence_label(event, questions) + "：" + event["summary"]) + ' · ' + link(event["source"], "证据") + '</li>' for event in view["history"])
             evidence.append('<details><summary>全部验证记录（' + str(len(view["history"])) + '）</summary><ul>' + history + '</ul></details>')
         if view["legacy"]:
             old = view["legacy"]
             text = esc(str(old.get("status", "")) + "。" + str(old.get("evidence", "")))
             source = link(old["source"], str(old.get("last_verified", "历史")) + " 的记录") if old.get("source") else esc(old.get("last_verified", "出处待定位"))
-            evidence.append('<details open><summary>历史摘要，尚未拆分为验证事件</summary><p>' + text + ' · ' + source + '</p></details>')
+            evidence.append('<details open><summary>' + HISTORY_NOTICE + '；历史摘要</summary><p>' + text + ' · ' + source + '</p></details>')
         elif not view["history"] and entry.get("evidence"):
             evidence.append(esc(entry["evidence"]))
         rows.append([esc(entry["title"]), esc(view["status"]), esc(view["review_status"]), '<br>'.join(evidence)])
@@ -125,7 +125,7 @@ def session_summary(session):
     return f"本场{label}：{start:%Y-%m-%d %H:%M:%S}开始，预算{duration(session['budget_seconds'])}，计划截止{session['deadline_at']}；继续时沿用原起点。"
 
 
-def context_markdown(course, progress, session, root):
+def context_markdown(course, progress, session, root, questions=None):
     current = progress["current"]
     script = SKILL_DIRECTORY / "scripts/render.py"
     try:
@@ -137,9 +137,13 @@ def context_markdown(course, progress, session, root):
              f"最后更新：{progress['updated_at']}。课堂状态：{session_summary(session)}", "",
              "## 当前目标与位置", "", course["goal"], "", current.get("stage", "尚未开始"), "", current.get("summary", "尚无作答证据"), "", "## 最新证据", ""]
     for entry in progress.get("knowledge", []):
-        lines.append("- " + entry["title"] + "：" + knowledge_text(entry))
+        lines.append("- " + entry["title"] + "：" + knowledge_text(entry, questions))
     lines += ["", "## 待复查与未完成", ""]
     lines += ["- " + value for value in current.get("unfinished", [])]
+    basis = mastery_basis(progress, list((questions or {}).values()))
+    lines += ["", "## 掌握依据构成", "", basis["summary"], "", "## 待查事实", ""]
+    facts = pending_facts(progress)
+    lines += ["- " + "；".join(str(fact.get(key) or "未确认") for key in ("content", "basis", "location")) for fact in facts] or ["暂无登记项。"]
     lines += ["", "## 下一次入口", "", progress["next_session"].get("connection", "开课时确定"), ""]
     lines += ["- " + value for value in progress["next_session"].get("objectives", [])]
     lines += ["", "完整安排见 [下次学习小纲](records/下次学习小纲.md)；周期复习与历史错题见 [错题本](review.html)。", "",
@@ -162,6 +166,17 @@ def outline_markdown(course, progress):
     lines += ["- " + value for value in session.get("objectives", [])]
     lines += ["", "## 预算与起止", "", session.get("budget_note", "按用户当次可用时间确定"), "", "实际开始与截止在正式开课前核时填写。", "", "## 资料与核验", ""]
     lines += ["- " + value for value in session.get("sources", [])]
+    lines += ["", "## 本次关键事实", "", "| 内容 | 依据等级 | 出处位置 |", "|---|---|---|"]
+    cell = lambda value: str(value or "未确认").replace("|", "／").replace("\n", " ")
+    facts = session.get("key_facts", [])
+    facts = facts if isinstance(facts, list) else []
+    lines += ["| " + " | ".join(cell(fact.get(key)) for key in ("content", "basis", "location")) + " |"
+              for fact in facts if isinstance(fact, dict)] or ["| 尚未列出 | 未确认 | 未确认 |"]
+    lines += ["", "## 关联既有知识", "", "| 既有知识 | 相同点 | 类比不成立之处 |", "|---|---|---|"]
+    connections = session.get("connections", [])
+    connections = connections if isinstance(connections, list) else []
+    lines += ["| " + " | ".join(cell(connection.get(key)) for key in ("prior_knowledge", "similarities", "limits")) + " |"
+              for connection in connections if isinstance(connection, dict)] or ["| 暂无登记的可靠关联 | 未确认 | 未确认 |"]
     lines += ["", "## 分段安排", "", "| 环节 | 计划 | 实际结果 |", "|---|---|---|"]
     lines += [f"| {row['stage']} | {row['plan'].replace('|', '／')} | 尚未执行 |" for row in session.get("segments", [])]
     lines += ["", "## 验收与顺延", ""]
@@ -305,6 +320,8 @@ def review_page(course, progress):
         content += '<p>计划复盘：' + esc(row["date"] or "日期待定") + '（' + esc(row["basis"]) + '）；' + esc(row["status"]) + '。</p>'
         content += items(period.get("review_plan", []))
     content += '<h2 id="queue">待复查队列</h2>'
+    if any("assessment" not in event for entry in progress.get("knowledge", []) for event in entry.get("evidence_history", [])) or any("assessment" not in entry for entry in progress.get("mistakes", [])) or any(entry.get("legacy_summary") for entry in progress.get("knowledge", [])):
+        content += '<p class="meta">' + HISTORY_NOTICE + '；到期日期、队列顺序和复习安排按原数据保留。</p>'
     content += table(["内容", "最近证据", "下一步"], [[esc(r["title"]), esc(r["evidence"]), esc(r["next_check"])] for r in progress.get("review_queue", [])])
     content += '<h2 id="mistakes">历史错题与最新结果</h2><p class="meta">原答与当日注记保留；当前结论看最新验证。未做后续核验的历史条目只作索引，不统一判为仍不会。</p>'
     dates = sorted({m["date"] for m in progress.get("mistakes", [])}, reverse=True)
@@ -314,6 +331,8 @@ def review_page(course, progress):
         rows = []
         for entry in entries:
             note = entry.get("latest_note") or ("当日历史注记：" + entry.get("historical_note", "未记录") + "；后续情况按最新知识证据和复查队列判断。")
+            if "assessment" not in entry:
+                note = HISTORY_NOTICE + "。" + note
             evidence = link(entry["evidence"], "原学习记录") if entry.get("evidence") else "原记录待定位"
             latest = ' · 最新验证日期：' + esc(entry["latest_date"]) if entry.get("latest_date") else ''
             rows.append([esc(entry["original"]), '<span class="red">' + esc(entry["correction"]) + '</span>', esc(note) + latest + '<br>' + evidence])
@@ -321,7 +340,7 @@ def review_page(course, progress):
     return page("周期复习与错题本", "按最新证据选题，周期末复习计入当天预算", content, [("index.html", "返回进度首页"), ("#period", "当前周期"), ("#queue", "待复查"), ("#mistakes", "历史错题")], footer="此页是复习安排与真实错题索引；未执行的复习不计为完成。")
 
 
-def home_page(root, course, progress, session, catalogue, context, outline):
+def home_page(root, course, progress, session, catalogue, context, outline, questions=None):
     days = progress.get("days", [])
     known = sum(d.get("duration_seconds") or 0 for d in days)
     unknown = sum(d.get("duration_seconds") is None or d.get("has_unknown_duration", False) for d in days)
@@ -331,7 +350,13 @@ def home_page(root, course, progress, session, catalogue, context, outline):
     today = current_time(course["timezone"]).date()
     content += '<section id="activity"><h2>学习日历 <span class="tag">' + str(today.year) + '</span></h2>' + heatmap(progress, today) + '</section>'
     content += '<section id="next"><h2>下一次学习</h2><p>' + esc(progress["next_session"].get("connection", "开课时确定")) + '</p>' + items(progress["next_session"].get("objectives", [])) + '<p>' + esc(progress["next_session"].get("budget_note", "")) + '</p><p>' + link("records/下次学习小纲.md", "阅读完整小纲") + ' · ' + link("plan.html", "课程计划与教材目录") + ' · ' + link("review.html", "周期复习与错题本") + '</p></section>'
-    content += '<section id="progress"><h2>知识进度与作答证据</h2>' + table(["内容", "各维度最新证据", "复查安排", "证据与历史"], knowledge_rows(progress.get("knowledge", []))) + '</section>'
+    question_list = questions or []
+    lookup = {question["id"]: question for question in question_list}
+    content += '<section id="progress"><h2>知识进度与作答证据</h2>' + table(["内容", "各维度最新证据", "复查安排", "证据与历史"], knowledge_rows(progress.get("knowledge", []), lookup))
+    content += '<h3>掌握依据构成</h3><p>' + esc(mastery_basis(progress, question_list)["summary"]) + '</p><h3>待查事实</h3>'
+    facts = pending_facts(progress)
+    content += table(["内容", "依据等级", "出处位置"], [[esc(fact.get(key) or "未确认") for key in ("content", "basis", "location")] for fact in facts]) if facts else '<p>暂无登记项。</p>'
+    content += '</section>'
     content += '<section id="records"><h2>学习记录</h2><ul class="records">'
     for day in sorted(days, key=lambda d: d["date"], reverse=True):
         label = link(day["record"], day["title"]) if day.get("record") else esc(day["title"])
@@ -363,13 +388,14 @@ def render_outputs(root):
     progress = read_json(root, "data/progress.json")
     session = read_json(root, "data/session.json")
     catalogue = read_json(root, "materials/catalogue.json")
-    context = context_markdown(course, progress, session, root)
+    questions = read_json(root, "data/questions.json", {"items": []})["items"]
+    context = context_markdown(course, progress, session, root, {question["id"]: question for question in questions})
     outline = outline_markdown(course, progress)
     return {"学习上下文.md": context, "学习计时.md": timer_markdown(session, course["time_policy"]),
             "materials/目录索引.md": material_index_markdown(catalogue),
             "records/下次学习小纲.md": outline, "plan.html": plan_page(course, progress, catalogue),
             "review.html": review_page(course, progress),
-            "index.html": home_page(root, course, progress, session, catalogue, context, outline)}
+            "index.html": home_page(root, course, progress, session, catalogue, context, outline, questions)}
 
 
 def snapshot_period(root, period_id):
@@ -422,8 +448,8 @@ def initialize(root, title, goal, timezone):
         write_json(root, "data/course.json", course)
     write_json(root, "data/progress.json", {"schema_version": 1, "updated_at": current_time(timezone).isoformat(),
         "current": {"stage": "资料准备", "summary": "尚未正式开课", "session_note": "未开课", "unfinished": [], "latest_day": None},
-        "knowledge": [], "review_queue": [], "mistakes": [], "days": [], "sessions": [], "periods": [], "maintenance": [],
-        "next_session": {"connection": "明确预算、初始化资料目录后制定本次小纲", "objectives": [], "sources": [], "segments": [], "acceptance": []}})
+        "knowledge": [], "review_queue": [], "mistakes": [], "days": [], "sessions": [], "periods": [], "maintenance": [], "pending_checks": [],
+        "next_session": {"connection": "明确预算、初始化资料目录后制定本次小纲", "objectives": [], "sources": [], "segments": [], "acceptance": [], "key_facts": [], "connections": []}})
     write_json(root, "data/session.json", {"status": "idle", "id": None, "started_at": None, "budget_seconds": 0, "deadline_at": None, "pauses": [], "last_checked_at": None, "ended_at": None})
     write_json(root, "materials/catalogue.json", {"schema_version": 1, "sources": []})
     write_json(root, "data/questions.json", {"schema_version": 1, "items": [], "source_entries": []})

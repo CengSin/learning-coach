@@ -10,7 +10,7 @@ from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
 from common import parse_time, project_path, read_json
-from knowledge import validate_knowledge
+from knowledge import accuracy_report, validate_knowledge
 from render import render_outputs
 from session_clock import elapsed
 
@@ -61,6 +61,7 @@ def unique(items, key, label, errors):
 def validate(root, check_generated=True, *, strict_materials=False, quick=False):
     root = Path(root).resolve()
     errors, warnings = [], []
+    accuracy = {"warnings": [], "mastery_basis": None}
     try:
         course = read_json(root, "data/course.json")
         progress = read_json(root, "data/progress.json")
@@ -136,6 +137,8 @@ def validate(root, check_generated=True, *, strict_materials=False, quick=False)
                     errors.append(f"题目 {question['id']} 缺少 {field}")
             if question.get("provenance") == "自编" and question.get("answer_source") == "官方答案":
                 errors.append("自编题不能标为官方答案")
+        accuracy = accuracy_report(progress, questions["items"])
+        warnings.extend(f"[{item['code']}] {item['location']}：{item['message']}" for item in accuracy["warnings"])
     except (OSError, ValueError, KeyError, TypeError) as error:
         return {"ok": False, "errors": [str(error)], "warnings": warnings}
 
@@ -203,6 +206,7 @@ def validate(root, check_generated=True, *, strict_materials=False, quick=False)
             if not target.exists() or target.read_text(encoding="utf-8") != expected:
                 errors.append("生成视图过期或不存在：" + relative)
     return {"ok": not errors, "errors": errors, "warnings": sorted(set(warnings)), "checked_documents": len(paths),
+            "accuracy_warnings": accuracy["warnings"], "mastery_basis": accuracy["mastery_basis"],
             "material_issues": material_issues, "source_fingerprints_checked": not quick,
             "imported_documents_checked": not quick, "strict_materials": strict_materials}
 
