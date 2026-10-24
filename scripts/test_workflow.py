@@ -496,6 +496,65 @@ class AccuracyTests(unittest.TestCase):
                 self.assertEqual(mastery_basis(progress, [question])["denominator"], 0)
                 self.assertIn("UNCHECKED_SELF_AUTHORED", self.codes(progress, [question]))
 
+    def test_missing_assessment_after_earliest_event_or_mistake_is_not_historical(self):
+        adopted = self.event("adopted")
+        adopted["date"] = "2026-10-18"
+        old, same_day, between, later = (self.event(name) for name in ("old", "same-day", "between", "later"))
+        for event, day in ((old, "2026-10-16"), (same_day, "2026-10-17"),
+                           (between, "2026-10-18"), (later, "2026-10-19")):
+            event.pop("assessment")
+            event["date"] = day
+        progress = self.progress(later, adopted, old, same_day, between)
+        assessment = copy.deepcopy(adopted["assessment"])
+        assessment["grading_check"] = {"method": "重核依据", "result": "确认判错"}
+        progress["mistakes"] = [{"id": "new", "date": "2026-10-17", "assessment": assessment},
+                                {"id": "old", "date": "2026-10-16"},
+                                {"id": "same-day", "date": "2026-10-17"},
+                                {"id": "later", "date": "2026-10-19"}]
+        before = copy.deepcopy(progress)
+        report = accuracy_report(progress, [self.question(provenance="官方公开")])
+        missing = [item for item in report["warnings"] if item["code"] == "MISSING_ASSESSMENT"]
+        self.assertEqual({item["location"] for item in missing},
+                         {"knowledge[k1].evidence_history[between]", "knowledge[k1].evidence_history[later]", "mistakes[later]"})
+        self.assertTrue(all("2026-10-17" in item["message"] for item in missing))
+        historical = next(item for item in report["warnings"] if item["code"] == "HISTORICAL_UNVERIFIED")
+        self.assertIn("2 条作答事件", historical["message"])
+        self.assertIn("2 条错题", historical["message"])
+        self.assertEqual(progress, before)
+
+    def test_missing_assessment_does_not_trigger_before_any_adoption(self):
+        old, later = self.event("old"), self.event("later")
+        for event in (old, later):
+            event.pop("assessment")
+        later["date"] = "2026-10-25"
+        progress = self.progress(old, later)
+        progress["mistakes"] = [{"id": "later", "date": "2026-10-26"}]
+        report = accuracy_report(progress, [])
+        self.assertNotIn("MISSING_ASSESSMENT", {item["code"] for item in report["warnings"]})
+        historical = next(item for item in report["warnings"] if item["code"] == "HISTORICAL_UNVERIFIED")
+        self.assertIn("2 条作答事件", historical["message"])
+        self.assertIn("1 条错题", historical["message"])
+
+    def test_missing_assessment_does_not_trigger_for_lecture(self):
+        adopted, lecture = self.event("adopted"), self.event("lecture")
+        lecture.pop("assessment")
+        lecture.update(dimension="讲解", status="已讲解", date="2026-10-25")
+        progress = self.progress(adopted, lecture)
+        codes = self.codes(progress, [self.question(provenance="官方公开")])
+        self.assertNotIn("MISSING_ASSESSMENT", codes)
+        self.assertNotIn("HISTORICAL_UNVERIFIED", codes)
+
+    def test_confirmed_key_fact_location_requires_named_source_and_position(self):
+        for basis in ("已对照教材原页", "来自官方题目答案"):
+            for location in ("教材", "第2章", None, "资料甲，第2章", "官方题集，第3题"):
+                with self.subTest(basis=basis, location=location):
+                    progress = self.progress()
+                    progress["next_session"]["key_facts"] = [{"content": "关键关系", "basis": basis, "location": location}]
+                    codes = self.codes(progress, [])
+                    self.assertEqual("KEY_FACT_LOCATION" in codes, location not in ("资料甲，第2章", "官方题集，第3题"))
+        progress["next_session"]["key_facts"][0].update(basis="模型自己的知识，未核对", location="待定位")
+        self.assertNotIn("KEY_FACT_LOCATION", self.codes(progress, []))
+
     def test_independent_check_accepts_both_colons_for_all_methods(self):
         progress = self.progress(self.event())
         for method, description in (("工具复算", "重新计算"), ("另一种解法", "逆向验证"),

@@ -27,15 +27,19 @@ def question_kind(question):
     return "unknown" if provenance in (None, "", "未知") else "other"
 
 
-def reference_check_located(method):
-    parts = re.split("[：:]", method, maxsplit=1)
-    if len(parts) != 2 or parts[0].strip() != REFERENCE_CHECK_METHOD:
+def source_location_present(details):
+    if not isinstance(details, str):
         return False
-    details = parts[1].strip()
+    details = details.strip()
     position = (r"第\s*[\d一二三四五六七八九十百千零〇两IVXivx.]+\s*[章节页题]"
                 r"|(?:章节?|页码?|题目?|pages?|pp?\.?)\s*\d+(?:\.\d+)*|#page=\d+")
     source = re.sub(position, "", details, flags=re.IGNORECASE)
     return bool(re.search(position, details, re.IGNORECASE) and re.search(r"[^\W\d_]", source))
+
+
+def reference_check_located(method):
+    parts = re.split("[：:]", method, maxsplit=1)
+    return len(parts) == 2 and parts[0].strip() == REFERENCE_CHECK_METHOD and source_location_present(parts[1])
 
 
 def independently_checked(question):
@@ -180,9 +184,8 @@ def accuracy_report(progress, questions):
             continue
         if not isinstance(fact.get("content"), str) or not fact["content"].strip():
             warn("KEY_FACT_CONTENT", location, "关键事实缺少内容")
-        if isinstance(fact.get("basis"), str) and fact["basis"] in CONFIRMED_BASES and (not isinstance(fact.get("location"), str)
-                or fact["location"].strip() in ("", "未知", "待定位", "待核对", "未确认")):
-            warn("KEY_FACT_LOCATION", location, "已核验事实缺少教材章节／页码或官方答案位置")
+        if isinstance(fact.get("basis"), str) and fact["basis"] in CONFIRMED_BASES and not source_location_present(fact.get("location")):
+            warn("KEY_FACT_LOCATION", location, "已核验事实须同时写明资料名及章节／页码或题目位置")
     connections = plan.get("connections", [])
     if ("key_facts" in plan and "connections" not in plan) or not isinstance(connections, list):
         warn("CONNECTION_FIELDS", "next_session.connections", "请明确知识关联；没有可靠关联可用空列表")
@@ -201,14 +204,29 @@ def accuracy_report(progress, questions):
                  "对照资料的方法须在冒号后写明资料名及章节／页码，或题目和答案出处")
     for entry in progress.get("knowledge", []):
         historical_summaries += bool(entry.get("legacy_summary"))
-        historical_events += sum("assessment" not in event and event.get("dimension") != "讲解"
-                                 for event in entry.get("evidence_history", []))
     records = [(event, False, f"knowledge[{entry['id']}].evidence_history[{event['id']}]")
                for entry in progress.get("knowledge", []) for event in entry.get("evidence_history", [])]
     records += [(mistake, True, f"mistakes[{mistake['id']}]") for mistake in progress.get("mistakes", [])]
+
+    def record_date(record):
+        try:
+            return date.fromisoformat(record.get("date"))
+        except (TypeError, ValueError):
+            return None
+
+    adoption_date = min((day for record, _, _ in records if "assessment" in record
+                         and (day := record_date(record)) is not None), default=None)
     for record, is_mistake, location in records:
         if "assessment" not in record:
-            historical_mistakes += is_mistake
+            if not is_mistake and record.get("dimension") == "讲解":
+                continue
+            day = record_date(record)
+            if adoption_date is not None and day is not None and day > adoption_date:
+                warn("MISSING_ASSESSMENT", location, "记录晚于最早采用日期 " + adoption_date.isoformat() + "，但缺少 assessment")
+            elif is_mistake:
+                historical_mistakes += 1
+            else:
+                historical_events += 1
             continue
         assessment = record["assessment"]
         if not isinstance(assessment, dict):

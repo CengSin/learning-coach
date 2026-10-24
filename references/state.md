@@ -28,10 +28,12 @@
 
 - next_session.key_facts、progress.pending_checks：每项 content、basis、location，仅需关联时加 id；前者备课、后者保留课后待查事实。next_session.connections：每项 prior_knowledge、similarities、limits，无合适关联可空列。
 - questions.items[].independent_check：仅 method、result；方法“工具复算”“另一种解法”或“对照教材原页／官方答案”。前两种可用中英文冒号附说明；第三种必须在冒号后写资料名及章节／页码，或题目和答案出处，缺少时警告且无掌握判定资格。对照须使用原 PDF 页面或官方答案原文，只对照解析稿或目录不算，与关键事实“已对照教材原页”的要求一致。“另一种解法”仅用于可独立求解的计算或推理题，概念题优先对照资料。结果仍为“一致”“不一致”或“待核对”，三种方法合格且结果一致时资格相同。改变答案相关条件的改编题用 adapted=true。
-- 新 evidence_history 事件和新 mistakes 带 assessment：mode、without_explanation，题目作答另填 question_ids；闭卷复述用 recall_gaps 列遗漏或错误的关键事实，不存长文本。既有 summary 简写结果，纯复述无题目时不要求关联 ID。
+- 新 evidence_history 作答事件和新 mistakes 带 assessment：mode、without_explanation，题目作答另填 question_ids；闭卷复述用 recall_gaps 列遗漏或错误的关键事实，不存长文本。既有 summary 简写结果，纯复述无题目时不要求关联 ID。
 - 只在新错题或 reasonable_disagreement=true 的合理分歧记录中要求 assessment.grading_check，字段仅 method、result。普通批改不要求此记录。
 
-缺 assessment 的事件和错题为历史记录，展示“历史记录，未按新规则核验”；不批量补字段、不改原结论，也不改变原复习队列、到期日期和复查状态。旧资料中的笼统验算说明不能自动转换为复算记录。后续实际复查再追加符合新规则的事件即可接入，无需批量迁移。
+项目中最早出现 assessment 的日期之后，缺少 assessment 的作答事件和错题视为漏填，校验给 MISSING_ASSESSMENT 警告，须依据实际作答补写 assessment，不计入历史；该日期当天及更早的缺失记录仍按历史处理。项目中尚无带 assessment 的记录时，不触发该警告，缺失记录仍按历史处理。讲解事件不要求 assessment。不按题目标题推断是否采用新规则。
+
+历史记录展示“历史记录，未按新规则核验”；不批量补字段、不改原结论，也不改变原复习队列、到期日期和复查状态。旧资料中的笼统验算说明不能自动转换为复算记录。后续实际复查再追加符合新规则的事件即可接入，无需批量迁移。
 
 新记录缺资格时保留练习事实，不替换已有有效或历史结论。掌握依据构成只对新规则下有效实际作答关联的题目去重统计，纯讲解、历史未核验和无复算资格的自编练习不入分母；空样本显示“无可统计依据”。
 
