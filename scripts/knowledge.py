@@ -1,4 +1,5 @@
 from datetime import date
+import re
 
 from common import project_path
 
@@ -14,6 +15,7 @@ HISTORY_NOTICE = "历史记录，未按新规则核验"
 FACT_BASES = {"已对照教材原页", "来自官方题目答案", "模型自己的知识，未核对", "推断"}
 CONFIRMED_BASES = {"已对照教材原页", "来自官方题目答案"}
 ASSESSMENT_MODES = {"独立作答", "提示后作答", "闭卷复述", "练习"}
+REFERENCE_CHECK_METHOD = "对照教材原页／官方答案"
 
 
 def question_kind(question):
@@ -25,12 +27,26 @@ def question_kind(question):
     return "unknown" if provenance in (None, "", "未知") else "other"
 
 
+def reference_check_located(method):
+    parts = re.split("[：:]", method, maxsplit=1)
+    if len(parts) != 2 or parts[0].strip() != REFERENCE_CHECK_METHOD:
+        return False
+    details = parts[1].strip()
+    position = (r"第\s*[\d一二三四五六七八九十百千零〇两IVXivx.]+\s*[章节页题]"
+                r"|(?:章节?|页码?|题目?|pages?|pp?\.?)\s*\d+(?:\.\d+)*|#page=\d+")
+    source = re.sub(position, "", details, flags=re.IGNORECASE)
+    return bool(re.search(position, details, re.IGNORECASE) and re.search(r"[^\W\d_]", source))
+
+
 def independently_checked(question):
     check = question.get("independent_check")
     if not isinstance(check, dict) or not isinstance(check.get("method"), str):
         return False
-    method = check["method"].split("：", 1)[0].strip()
-    return method in ("工具复算", "另一种解法") and check.get("result") == "一致"
+    method = re.split("[：:]", check["method"], maxsplit=1)[0].strip()
+    valid_method = method in ("工具复算", "另一种解法")
+    if check["method"].strip().startswith(REFERENCE_CHECK_METHOD):
+        valid_method = reference_check_located(check["method"])
+    return valid_method and check.get("result") == "一致"
 
 
 def grading_checked(assessment):
@@ -177,6 +193,12 @@ def accuracy_report(progress, questions):
             warn("CONNECTION_FIELDS", f"next_session.connections[{index}]", "知识关联须有既有知识、相同点和类比不成立之处")
     lookup = {question["id"]: question for question in questions}
     historical_events = historical_mistakes = historical_summaries = 0
+    for question in questions:
+        check = question.get("independent_check")
+        method = check.get("method") if isinstance(check, dict) else None
+        if isinstance(method, str) and method.strip().startswith(REFERENCE_CHECK_METHOD) and not reference_check_located(method):
+            warn("REFERENCE_CHECK_LOCATION", f"questions[{question['id']}].independent_check.method",
+                 "对照资料的方法须在冒号后写明资料名及章节／页码，或题目和答案出处")
     for entry in progress.get("knowledge", []):
         historical_summaries += bool(entry.get("legacy_summary"))
         historical_events += sum("assessment" not in event and event.get("dimension") != "讲解"

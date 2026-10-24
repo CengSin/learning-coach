@@ -482,7 +482,8 @@ class AccuracyTests(unittest.TestCase):
         self.assertIn("UNCHECKED_SELF_AUTHORED", self.codes(progress, [question]))
         self.assertEqual(mastery_basis(progress, [question])["denominator"], 0)
         self.assertNotIn("作答：独立正确", knowledge_view(progress["knowledge"][0], {"q1": question})["status"])
-        for method in ("工具复算", "另一种解法：逆向检查"):
+        for method in ("工具复算", "另一种解法：逆向检查", "对照教材原页／官方答案：资料甲，第2章",
+                       "对照教材原页／官方答案：官方题集，第3题及官方答案第8页"):
             question["independent_check"] = {"method": method, "result": "一致"}
             self.assertTrue(independently_checked(question))
             self.assertEqual(mastery_basis(progress, [question])["denominator"], 1)
@@ -494,6 +495,50 @@ class AccuracyTests(unittest.TestCase):
                 question["independent_check"] = check
                 self.assertEqual(mastery_basis(progress, [question])["denominator"], 0)
                 self.assertIn("UNCHECKED_SELF_AUTHORED", self.codes(progress, [question]))
+
+    def test_independent_check_accepts_both_colons_for_all_methods(self):
+        progress = self.progress(self.event())
+        for method, description in (("工具复算", "重新计算"), ("另一种解法", "逆向验证"),
+                                    ("对照教材原页／官方答案", "资料甲，第2章")):
+            for colon in ("：", ":"):
+                with self.subTest(method=method, colon=colon):
+                    question = self.question(check={"method": method + colon + description, "result": "一致"})
+                    self.assertTrue(independently_checked(question))
+                    self.assertEqual(mastery_basis(progress, [question])["denominator"], 1)
+                    self.assertEqual(self.codes(progress, [question]), set())
+
+    def test_reference_check_requires_named_source_and_location(self):
+        progress = self.progress(self.event())
+        for method in ("对照教材原页／官方答案", "对照教材原页／官方答案：", "对照教材原页／官方答案：资料甲",
+                       "对照教材原页／官方答案：第2章", "对照教材原页／官方答案：资料甲，待定位"):
+            with self.subTest(method=method):
+                question = self.question(check={"method": method, "result": "一致"})
+                self.assertIn("REFERENCE_CHECK_LOCATION", self.codes(progress, [question]))
+                self.assertEqual(mastery_basis(progress, [question])["denominator"], 0)
+        for method in ("对照教材原页／官方答案：资料甲，第十二页", "对照教材原页／官方答案: Manual A, p.12",
+                       "对照教材原页／官方答案：资料甲.pdf#page=12"):
+            with self.subTest(method=method):
+                question = self.question(check={"method": method, "result": "一致"})
+                self.assertNotIn("REFERENCE_CHECK_LOCATION", self.codes(progress, [question]))
+                self.assertEqual(mastery_basis(progress, [question])["denominator"], 1)
+                for result in ("不一致", "待核对"):
+                    question["independent_check"]["result"] = result
+                    self.assertEqual(mastery_basis(progress, [question])["denominator"], 0)
+                    self.assertNotIn("REFERENCE_CHECK_LOCATION", self.codes(progress, [question]))
+
+    def test_validate_warns_about_reference_location_even_without_answers(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            initialize(root, "通用课程", "对照概念依据", "Asia/Shanghai")
+            question = self.question(check={"method": "对照教材原页／官方答案：资料甲", "result": "一致"})
+            question["exposure"]["answered"] = False
+            write_json(root, "data/questions.json", {"items": [question]})
+            report = validate(root, check_generated=False)
+            self.assertTrue(report["ok"], report)
+            self.assertEqual({item["code"] for item in report["accuracy_warnings"]}, {"REFERENCE_CHECK_LOCATION"})
+            question["independent_check"]["method"] += "，第2章"
+            write_json(root, "data/questions.json", {"items": [question]})
+            self.assertEqual(validate(root, check_generated=False)["accuracy_warnings"], [])
 
     def test_unchecked_practice_does_not_replace_prior_conclusion(self):
         historical = self.event("old")

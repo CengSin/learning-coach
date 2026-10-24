@@ -27,7 +27,7 @@
 字段和资格详见 [accuracy.md](accuracy.md)，保留现有 schema_version，采用可缺省的新增字段：
 
 - next_session.key_facts、progress.pending_checks：每项 content、basis、location，仅需关联时加 id；前者备课、后者保留课后待查事实。next_session.connections：每项 prior_knowledge、similarities、limits，无合适关联可空列。
-- questions.items[].independent_check：仅 method、result；方法“工具复算”或“另一种解法”（可用中文冒号附说明），结果“一致”“不一致”或“待核对”。改变答案相关条件的改编题用 adapted=true。
+- questions.items[].independent_check：仅 method、result；方法“工具复算”“另一种解法”或“对照教材原页／官方答案”。前两种可用中英文冒号附说明；第三种必须在冒号后写资料名及章节／页码，或题目和答案出处，缺少时警告且无掌握判定资格。对照须使用原 PDF 页面或官方答案原文，只对照解析稿或目录不算，与关键事实“已对照教材原页”的要求一致。“另一种解法”仅用于可独立求解的计算或推理题，概念题优先对照资料。结果仍为“一致”“不一致”或“待核对”，三种方法合格且结果一致时资格相同。改变答案相关条件的改编题用 adapted=true。
 - 新 evidence_history 事件和新 mistakes 带 assessment：mode、without_explanation，题目作答另填 question_ids；闭卷复述用 recall_gaps 列遗漏或错误的关键事实，不存长文本。既有 summary 简写结果，纯复述无题目时不要求关联 ID。
 - 只在新错题或 reasonable_disagreement=true 的合理分歧记录中要求 assessment.grading_check，字段仅 method、result。普通批改不要求此记录。
 
