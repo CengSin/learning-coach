@@ -461,6 +461,74 @@ def home_page(root, course, progress, session, catalogue, context, outline, ques
     return page(course["title"], course["goal"], content, [("#current", "当前位置"), ("#activity", "学习日历"), ("#next", "下一次学习"), ("#progress", "知识进度"), ("#records", "学习记录"), ("review.html", "周期错题本"), ("plan.html", "课程与大纲"), ("schedule.html", "每日计划"), ("#documents", "正文与职责"), ("#archive", "历史与验证")], eyebrow="学习进度 · " + str(current.get("latest_day") or "尚未开课"), footer=footer)
 
 
+DAILY_SUFFIX = "学习要点、错题总结以及注意点"
+
+
+def daily_mistakes_section(progress, day):
+    mistakes = [item for item in progress.get("mistakes", []) if item.get("date") == day]
+    if not mistakes:
+        return ""
+    titles = {entry["id"]: entry.get("title", entry["id"]) for entry in progress.get("knowledge", [])}
+    blocks = []
+    for number, item in enumerate(mistakes, 1):
+        label = titles.get(item.get("knowledge_id")) or item.get("title") or f"错题 {number}"
+        check = item.get("assessment", {}).get("grading_check") or {}
+        block = f'<h3 id="mistake-{esc(item["id"])}">{esc(label)}</h3><p>原答：{esc(item.get("original", ""))}</p>'
+        block += f'<p><span class="red">订正：</span>{esc(item.get("correction", ""))}</p>'
+        if check:
+            block += f'<p class="meta">判错复核：{esc(check.get("method", ""))}；{esc(check.get("result", ""))}</p>'
+        if item.get("latest_note"):
+            block += f'<p class="meta">最新证据：{esc(item["latest_note"])}</p>'
+        blocks.append(block)
+    return '<h2 id="mistakes">真实错题、原答与订正</h2>' + "".join(blocks)
+
+
+def daily_record(root, day, content, summary=None, *, replace=False):
+    """把 Agent 写的正文片段套进每日模板：自动补标题锚点、左侧目录、当天错题和用时。"""
+    root = Path(root).resolve()
+    date.fromisoformat(day)
+    progress = read_json(root, "data/progress.json")
+    if 'id="mistakes"' not in content:
+        content += daily_mistakes_section(progress, day)
+    used, toc = set(re.findall(r'\bid="([^"]+)"', content)), []
+
+    def anchor(match):
+        level, attributes, text = match.group(1), match.group(2), match.group(3)
+        found = re.search(r'\bid="([^"]+)"', attributes)
+        if found:
+            identifier = found.group(1)
+        else:
+            identifier = f"s{len(toc) + 1}"
+            while identifier in used:
+                identifier += "-1"
+            used.add(identifier)
+            attributes += f' id="{identifier}"'
+        label = re.sub(r"<[^>]+>", "", text).strip()
+        toc.append(f'<a href="#{esc(identifier)}"' + (' style="padding-left:1em"' if level == "3" else "") + f">{esc(label)}</a>")
+        return f"<h{level}{attributes}>{text}</h{level}>"
+
+    content = re.sub(r"<h([23])([^>]*)>(.*?)</h\1>", anchor, content, flags=re.S)
+    entry = next((item for item in progress.get("days", []) if item["date"] == day), None)
+    if summary is None:
+        summary = "实际用时 " + duration(entry.get("duration_seconds")) if entry else "实际用时未可靠记录"
+        if entry and entry.get("has_unknown_duration"):
+            summary += "（另有未可靠计时部分）"
+    relative = f"records/{day}{DAILY_SUFFIX}.html"
+    if project_path(root, relative).exists() and not replace:
+        raise ValueError("已有记录 " + relative + "；需要整体替换时先把原页仍正确的内容并入片段，再加 --replace")
+    page_html = (ASSETS / "daily-record.html").read_text(encoding="utf-8")
+    for key, value in (("__TOC__", "".join(toc)), ("__SESSION_SUMMARY__", esc(summary)), ("__CONTENT__", content), ("__DATE__", day)):
+        page_html = page_html.replace(key, value)
+    write_text(project_path(root, relative), page_html)
+    if entry is None:
+        entry = {"date": day, "title": "学习记录", "duration_seconds": None}
+        progress.setdefault("days", []).append(entry)
+    if entry.get("record") != relative:
+        entry["record"] = relative
+        write_json(root, "data/progress.json", progress)
+    return relative
+
+
 def render_outputs(root):
     root = Path(root).resolve()
     course = read_json(root, "data/course.json")
@@ -544,6 +612,11 @@ def main():
     commands.add_parser("migrate-knowledge")
     period = commands.add_parser("snapshot-period")
     period.add_argument("--period", required=True)
+    daily = commands.add_parser("daily", help="用模板生成某天的独立学习记录页")
+    daily.add_argument("--date", required=True)
+    daily.add_argument("--content", required=True, help="Agent 写好的正文 HTML 片段（h2/h3 分节，不含模板外壳）")
+    daily.add_argument("--summary", help="页首摘要，默认取当天实际用时")
+    daily.add_argument("--replace", action="store_true", help="整体替换已有记录页")
     new = commands.add_parser("init")
     new.add_argument("--title", required=True)
     new.add_argument("--goal", required=True)
@@ -560,6 +633,8 @@ def main():
             snapshot_period(root, args.period)
         if args.action == "init":
             initialize(root, args.title, args.goal, args.timezone)
+        if args.action == "daily":
+            daily_record(root, args.date, Path(args.content).read_text(encoding="utf-8"), args.summary, replace=args.replace)
         outputs = render_outputs(root)
         for path, text in outputs.items():
             write_text(root / path, text)

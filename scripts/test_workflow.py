@@ -807,5 +807,99 @@ class AccuracyTests(unittest.TestCase):
             self.assertEqual(before, {path.relative_to(root): path.read_bytes() for path in root.rglob("*") if path.is_file()})
 
 
+class ClassLogTests(unittest.TestCase):
+    SCRIPTS = Path(__file__).resolve().parent
+
+    def run_script(self, root, script, *args, check=True):
+        command = [sys.executable, "-B", str(self.SCRIPTS / script), "--root", str(root), *args]
+        return subprocess.run(command, check=check, capture_output=True, text=True)
+
+    def project(self, temporary):
+        root = Path(temporary)
+        initialize(root, "通用课程", "记账测试", "Asia/Shanghai")
+        self.run_script(root, "session_clock.py", "start", "--minutes", "30", "--reason", "用户明确本次30分钟", "--override-daily-budget")
+        return root
+
+    def test_log_ticks_and_commit_is_idempotent_and_valid(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = self.project(temporary)
+            logged = json.loads(self.run_script(root, "record.py", "log", "teach", "--knowledge", "k1", "--title", "概念甲",
+                                                "--summary", "讲解概念甲的输入输出").stdout)
+            self.assertEqual(logged["phase"], "learn")
+            self.assertIn("下一计划日", logged["next_action"])
+            self.run_script(root, "record.py", "log", "question", "--id", "q1", "--title", "题一", "--stem", "条件甲下求乙",
+                            "--answer", "乙=2", "--knowledge", "k1", "--check", "工具复算：枚举|一致")
+            self.run_script(root, "record.py", "log", "answer", "--knowledge", "k1", "--question", "q1", "--status", "当场订正",
+                            "--summary", "起点用错，订正后正确", "--original", "乙=3", "--correction", "从当前状态起步",
+                            "--grading-check", "工具复算：重新枚举|乙=2")
+            self.run_script(root, "record.py", "log", "recall", "--knowledge", "k1")
+            first = json.loads(self.run_script(root, "record.py", "commit").stdout)
+            self.assertEqual(first["entries"], 4)
+            progress_before = (root / "data/progress.json").read_bytes()
+            again = json.loads(self.run_script(root, "record.py", "commit").stdout)
+            self.assertEqual(again["changes"], 0)
+            self.assertEqual(progress_before, (root / "data/progress.json").read_bytes())
+            progress = read_json(root, "data/progress.json")
+            questions = read_json(root, "data/questions.json")["items"]
+            events = progress["knowledge"][0]["evidence_history"]
+            self.assertEqual([event["dimension"] for event in events], ["讲解", "作答", "作答"])
+            self.assertEqual(events[2]["assessment"]["recall_gaps"], [])
+            self.assertEqual(progress["mistakes"][0]["original"], "乙=3")
+            self.assertTrue(questions[0]["exposure"]["answered"])
+            report = accuracy_report(progress, questions)
+            self.assertEqual([w for w in report["warnings"] if w["code"] != "KEY_FACTS_MISSING"], [])
+            self.assertEqual(validate_knowledge(root, progress["knowledge"]), [])
+
+    def test_log_rejects_missing_checks_without_writing(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = self.project(temporary)
+            failed = self.run_script(root, "record.py", "log", "question", "--id", "q1", "--title", "题", "--stem", "干",
+                                     "--answer", "答", check=False)
+            self.assertNotEqual(failed.returncode, 0)
+            failed = self.run_script(root, "record.py", "log", "answer", "--knowledge", "k1", "--status", "未通过",
+                                     "--summary", "错", "--original", "原答", check=False)
+            self.assertNotEqual(failed.returncode, 0)
+            self.assertFalse((root / "records/class-log").exists())
+
+    def test_finish_before_budget_requires_user_stop(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = self.project(temporary)
+            refused = self.run_script(root, "session_clock.py", "finish", "--reason", "本单元目标已完成", check=False)
+            self.assertNotEqual(refused.returncode, 0)
+            self.assertIn("--user-stop", refused.stderr)
+            self.assertEqual(read_json(root, "data/session.json")["status"], "running")
+            done = self.run_script(root, "session_clock.py", "finish", "--user-stop", "--reason", "用户：今天先到这里")
+            self.assertEqual(json.loads(done.stdout)["status"], "ended")
+
+    def test_snapshot_reports_next_action_by_phase(self):
+        session = transition({"status": "idle"}, "start", POLICY, START, minutes=60)
+        self.assertIn("下一计划日", snapshot(session, POLICY, START)["next_action"])
+        self.assertIn("立即收尾", snapshot(session, POLICY, START + timedelta(minutes=61))["next_action"])
+
+    def test_daily_page_builds_toc_mistakes_and_refuses_overwrite(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            initialize(root, "通用课程", "记录页", "Asia/Shanghai")
+            progress = read_json(root, "data/progress.json")
+            progress["days"] = [{"date": "2026-10-16", "title": "测试日", "duration_seconds": 1800, "record": None}]
+            progress["mistakes"] = [{"id": "m1", "date": "2026-10-16", "original": "原答甲", "correction": "订正乙",
+                                     "assessment": {"grading_check": {"method": "工具复算", "result": "乙"}}}]
+            write_json(root, "data/progress.json", progress)
+            fragment = root / "fragment.html"
+            write_text(fragment, "<h2>要点</h2><p>内容</p><h3>记忆办法</h3><p>口诀</p>")
+            self.run_script(root, "render.py", "daily", "--date", "2026-10-16", "--content", str(fragment))
+            page = (root / "records/2026-10-16学习要点、错题总结以及注意点.html").read_text(encoding="utf-8")
+            self.assertIn('<a href="#s1">要点</a>', page)
+            self.assertIn('id="mistakes"', page)
+            self.assertIn("原答甲", page)
+            self.assertIn("实际用时 30分00秒", page)
+            self.assertEqual(read_json(root, "data/progress.json")["days"][0]["record"],
+                             "records/2026-10-16学习要点、错题总结以及注意点.html")
+            self.assertTrue(validate(root)["ok"], validate(root))
+            refused = self.run_script(root, "render.py", "daily", "--date", "2026-10-16", "--content", str(fragment), check=False)
+            self.assertNotEqual(refused.returncode, 0)
+            self.run_script(root, "render.py", "daily", "--date", "2026-10-16", "--content", str(fragment), "--replace")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
