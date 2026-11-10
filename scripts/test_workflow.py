@@ -19,7 +19,7 @@ from knowledge import (HISTORY_NOTICE, accuracy_report, assessment_state, indepe
                        knowledge_view, mastery_basis, migrate_knowledge, pending_facts, validate_knowledge)
 from render import heatmap, initialize, render_outputs, review_schedule, snapshot_period
 from session_clock import archive_finished, check_daily_budget, elapsed, snapshot, transition
-from validate import validate
+from validate import validate, validate_course_plan
 
 
 POLICY = {"stop_concepts_before_end_minutes": 10, "stop_questions_before_end_minutes": 5, "notice_elapsed_minutes": [20, 40]}
@@ -27,6 +27,28 @@ START = datetime(2026, 10, 16, 14, 35, 31, tzinfo=ZoneInfo("Asia/Shanghai"))
 
 
 class WorkflowTests(unittest.TestCase):
+    def test_calendar_plan_is_visible_and_checks_every_day(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            initialize(root, "测试课程", "三日内完成入门", "Asia/Shanghai")
+            course = read_json(root, "data/course.json")
+            course["planning"] = {"status": "active", "effective_date": "2026-10-16", "deadline_date": "2026-10-18", "deadline_basis": "用户选定", "revision": 1}
+            course["stages"] = [{"title": "入门", "goal": "能独立解释", "status": "进行中", "planned_start": "2026-10-16", "planned_end": "2026-10-18"}]
+            course["modules"] = [{"id": "M1", "title": "基础", "topics": ["概念"], "status": "进行中", "planned_start": "2026-10-16", "planned_end": "2026-10-18"}]
+            course["daily_plan"] = [
+                {"date": "2026-10-16", "minutes": 30, "module_id": "M1", "focus": "概念与例子", "outcome": "能说明输入输出"},
+                {"date": "2026-10-17", "minutes": 0, "module_id": None, "focus": "休息", "outcome": "不安排新课"},
+                {"date": "2026-10-18", "minutes": 45, "module_id": "M1", "focus": "独立应用", "outcome": "完成一题"},
+            ]
+            write_json(root, "data/course.json", course)
+            self.assertEqual(validate_course_plan(course), [])
+            output = render_outputs(root)
+            self.assertIn("2026-10-16 ～ 2026-10-18", output["plan.html"])
+            self.assertIn("独立应用", output["schedule.html"])
+            self.assertIn("每日计划", output["index.html"])
+            course["daily_plan"].pop(1)
+            self.assertIn("每日简纲没有覆盖生效日至截止日的每一天", validate_course_plan(course))
+
     def started(self, minutes=60):
         return transition({"status": "idle"}, "start", POLICY, START, minutes=minutes)
 

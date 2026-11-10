@@ -4,7 +4,7 @@ import html
 import json
 import math
 import re
-from datetime import date
+from datetime import date, timedelta
 from html.parser import HTMLParser
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
@@ -58,6 +58,64 @@ def unique(items, key, label, errors):
         seen.add(item.get(key))
 
 
+def validate_course_plan(course):
+    errors = []
+    planning = course.get("planning", {})
+    status = planning.get("status", "needs_input")
+    if status not in ("needs_input", "provisional", "active"):
+        return ["无效规划状态"]
+    if status == "needs_input":
+        return errors
+    try:
+        effective = date.fromisoformat(planning["effective_date"])
+        deadline = date.fromisoformat(planning["deadline_date"])
+    except (KeyError, TypeError, ValueError):
+        return ["执行中的规划必须有有效的生效日和截止日"]
+    if deadline < effective:
+        errors.append("规划截止日早于生效日")
+    if not planning.get("deadline_basis"):
+        errors.append("规划缺少截止日依据")
+    for label, entries in (("阶段", course.get("stages", [])), ("模块", course.get("modules", []))):
+        if not entries:
+            errors.append(label + "时间表为空")
+        for item in entries:
+            name = item.get("id") or item.get("title") or "未命名"
+            try:
+                start = date.fromisoformat(item["planned_start"])
+                end = date.fromisoformat(item["planned_end"])
+            except (KeyError, TypeError, ValueError):
+                errors.append(label + "缺少有效时间窗：" + name)
+                continue
+            if end < start:
+                errors.append(label + "结束早于开始：" + name)
+    module_ids = {item.get("id") for item in course.get("modules", [])}
+    planned_days = course.get("daily_plan", [])
+    seen = set()
+    for item in planned_days:
+        try:
+            day = date.fromisoformat(item["date"])
+        except (KeyError, TypeError, ValueError):
+            errors.append("每日简纲日期无效")
+            continue
+        if day in seen:
+            errors.append("每日简纲日期重复：" + day.isoformat())
+        seen.add(day)
+        if day < effective or day > deadline:
+            errors.append("每日简纲超出规划范围：" + day.isoformat())
+        minutes = item.get("minutes")
+        if isinstance(minutes, bool) or not isinstance(minutes, (int, float)) or not math.isfinite(minutes) or minutes < 0:
+            errors.append("每日计划分钟无效：" + day.isoformat())
+        if item.get("module_id") and item["module_id"] not in module_ids:
+            errors.append("每日简纲模块不存在：" + day.isoformat())
+        if not item.get("focus") or not item.get("outcome"):
+            errors.append("每日简纲缺少主线或成果：" + day.isoformat())
+    if deadline >= effective:
+        required = (deadline - effective).days + 1
+        if len(seen) != required or effective not in seen or deadline not in seen:
+            errors.append("每日简纲没有覆盖生效日至截止日的每一天")
+    return errors
+
+
 def validate(root, check_generated=True, *, strict_materials=False, quick=False):
     root = Path(root).resolve()
     errors, warnings = [], []
@@ -69,6 +127,7 @@ def validate(root, check_generated=True, *, strict_materials=False, quick=False)
         catalogue = read_json(root, "materials/catalogue.json")
         questions = read_json(root, "data/questions.json")
         errors.extend(validate_knowledge(root, progress.get("knowledge", [])))
+        errors.extend(validate_course_plan(course))
         policy = course["time_policy"]
         for key in ("weekday_minutes", "weekend_minutes"):
             limit = policy.get(key)

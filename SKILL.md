@@ -1,6 +1,6 @@
 ---
 name: learning-coach
-description: 持续学习协作：根据目标寻找资料，从教材目录建立课程，按实际作答生成每次小纲、讲解批改、计时、周期复习并保存本地进度网页。用于开始或继续课程、调整学习计划、复习错题和整理学习记录；资料维护和技能验证本身不启动课堂。
+description: 根据学习目标、截止日和可用时间制定阶段及每日计划，按用户资料和真实作答备课、教学、练习并动态调整进度。用于建立或继续课程、更新学习计划、复习错题和保存记录；资料维护本身不启动课堂。
 ---
 
 # 学习教练
@@ -13,17 +13,18 @@ description: 持续学习协作：根据目标寻找资料，从教材目录建�
 
 1. 读取项目 AGENTS.md 指定的配置、当前状态和最近场次。默认使用 `data/course.json`、`data/progress.json`、`data/session.json`、`materials/catalogue.json`。已有文件采用映射接入，保留真实历史，不要求用户重新输入已知目标或重新搬运资料。
 2. 未开课的接续、备课及准备新 OCR 前，运行本 skill 的 `scripts/scan_materials.py --root <项目目录>`，检查解析根目录与已登记子目录。即使用户没有说“放好了”，也检查新增、变更、缺失及未归属文件；有变化再按 materials.md 增量导入，未变化直接复用。若已有进行中场次，先核时，复用既有索引并只读本段必要资料，全量扫描与校验放收尾后；发现当前材料失效则停止使用并说明。检查在 Agent 工作时执行，不后台监听。
-3. 新项目先了解学习目标，再补齐必要的基础、期限、可用时间和资料情况。按目标搜索资料的名称、版本、正规获取入口，创建项目内 `materials/`，向用户展示实际绝对路径。用户自行解析 PDF 时，为每份资料创建 `materials/parsed/<资料ID>/` 并给出实际绝对路径；用户放好后按 materials.md 导入。只整理文件时不计为开课。
-4. 信息职责和 JSON 数据约定见 [state.md](references/state.md)。可用 `python3 <skill目录>/scripts/render.py --root <项目目录> init --title <课程名> --goal <目标>` 初始化空项目；先填写项目预算与目标，再上课。
+3. 首次执行或调整目标、期限、时间时读 [planning.md](references/planning.md)，补齐目标、截止日、每周可用时间、基础和资料；先比较可用时间与估计工作量，再保存阶段、模块时间窗及每日简纲。按目标搜索资料的名称、版本、正规获取入口，创建项目内 `materials/`，向用户展示实际绝对路径。用户自行解析 PDF 时，为每份资料创建 `materials/parsed/<资料ID>/` 并给出实际绝对路径；用户放好后按 materials.md 导入。只整理文件时不计为开课。
+4. 信息职责和 JSON 数据约定见 [state.md](references/state.md)。可用 `python3 <skill目录>/scripts/render.py --root <项目目录> init --title <课程名> --goal <目标>` 初始化空项目；先完成目标、截止日、可用时间和每日计划，再上课。
 5. `学习上下文.md`、`学习计时.md`、`index.html`、`plan.html` 和下次小纲是生成视图。修改权威数据后运行 `render.py build`，不分别手改同一事实的多个副本。
 
 ## 根据用户意图执行
 
 | 请求 | 必读资料 | 具体产出 |
 |---|---|---|
-| 建立课程、准备资料 | [materials.md](references/materials.md)、[模板](assets/templates.md) | 资料清单、目录索引、初版课程大纲；标明未读正文 |
+| 建立课程、准备资料 | [planning.md](references/planning.md)、[materials.md](references/materials.md)、[模板](assets/templates.md) | 目标与截止日、可行性、阶段及每日计划、资料清单；标明未读正文 |
+| 更新目标、时间或学习计划 | [planning.md](references/planning.md)、[state.md](references/state.md) | 剩余容量核算、旧新计划差异、更新后的每日简纲及修订记录 |
 | 用户自行解析、已放好解析文件 | [materials.md](references/materials.md)、[state.md](references/state.md) | 专属存放目录、导入检查、章节与原 PDF 页序映射 |
-| 开课、继续、讲解、批改 | [teaching.md](references/teaching.md)、项目当前状态、计时、上次记录 | 本次小纲、教学和最新证据 |
+| 开课、继续、讲解、批改 | [planning.md](references/planning.md)、[teaching.md](references/teaching.md)、项目当日计划、当前状态、计时、上次记录 | 对照当日简纲和用户资料生成小纲、教学和最新证据 |
 | 周期复盘、错题复习 | [state.md](references/state.md)、复习队列与周期记录 | 当次预算内的复习安排、周期快照和下一周期调整 |
 | 核验知识或题目 | [materials.md](references/materials.md) | 来源位置、核验结论、不确定项和受影响记录 |
 | 保存学习记录 | [state.md](references/state.md)、[模板](assets/templates.md) | 对应日期记录、进度和首页；不新增学习时长 |
@@ -32,6 +33,7 @@ description: 持续学习协作：根据目标寻找资料，从教材目录建�
 ## 保持的关键约束
 
 - 最新用户指示决定当前安排。课程预算与收尾边界从项目读取，不能把某门课的工作日 60 分钟推广为所有课程的要求。
+- 每次开课及周期复盘核对目标截止、阶段／模块时间窗、今日简纲与实际进度。逾期内容说明去向并重排，不把待补漏等同于必须停留在原模块；计划与实际分别展示。
 - 开课连接“上次已学 → 尚未验证 → 今天目标”，先给整场预算、真实起止、主线和分段安排，再给少量混合复习。每个小段明确输入、步骤和输出。
 - 每次教学回复前读取实际时钟并更新场次；“继续”和换对话均不重置计时。仅明确休息才暂停，等待回复仍计时。达到截止立即收尾；记录文件不是后台闹钟。
 - 先列题目条件，再让用户作答；不提前公开练习答案。只修正实际错误，保留正确步骤；没有过程时不猜错因。重复错误改用更小例子或条件对照，再回到综合。
@@ -46,8 +48,8 @@ description: 持续学习协作：根据目标寻找资料，从教材目录建�
 - `scripts/session_clock.py`：实际计时、暂停恢复、整日预算检查、本场收尾窗口和计时视图。短课先设置可用窗口，纯复习可单独指定。具体命令见 teaching.md 或 `--help`。测试使用独立临时项目，不能改真实场次。
 - `scripts/pdf_pages.py`：准备一个明确页段的页图与清单，可选提取文本；默认 12 页是单批准备上限，不是整项任务的总页数上限。它不调用 OCR 或管理算力。成本选择、批量任务、缓存与 Unlimited-OCR 接入见 materials.md。
 - `scripts/scan_materials.py`：只读比较解析文件与导入清单的指纹，列出新增、修改、缺失和未归属文件；不自动改变核验状态。
-- `scripts/render.py`：初始化、生成首页、课程计划、当前状态、下次小纲和周期复习视图。
-- `scripts/validate.py`：检查证据、事实依据、自编题复算、必要批改复核、掌握依据构成及文件一致性；原解析稿辅助断链分级报告，必要图片缺失仍报错。`--quick` 跳过原稿扫描与全文指纹，不能替代完整检查。
+- `scripts/render.py`：初始化、生成首页、阶段与每日计划、当前状态、下次小纲和周期复习视图。
+- `scripts/validate.py`：检查计划时间窗与每日简纲覆盖、证据、事实依据、自编题复算、必要批改复核、掌握依据构成及文件一致性；原解析稿辅助断链分级报告，必要图片缺失仍报错。`--quick` 跳过原稿扫描与全文指纹，不能替代完整检查。
 - `assets/dashboard.html`、`assets/daily-record.html`：单文件网页模板，无外部依赖；[templates.md](assets/templates.md) 提供资料、大纲、小纲、职责、周期与错题表。
 
 生成阅读页后告知用户：在项目根目录运行 `python3 -m http.server 8998 --bind 127.0.0.1`，打开 `http://127.0.0.1:8998/`。使用相对链接，适配手机、键盘和打印；点图表示真实学习投入，章节状态另示掌握证据。未知时长用明确文字标识，不填成零或预算时长。

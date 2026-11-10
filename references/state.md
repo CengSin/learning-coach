@@ -10,13 +10,13 @@
 | 资料、目录、页段与页码问题 | materials/catalogue.json | 初始化、解析与核验后 | plan.html 的资料目录 |
 | 题目来源与曝光 | data/questions.json | 收录、展示、提示与作答 | 首页资料状态与题库状态 |
 | 当日知识与真实错题原文 | records/YYYY-MM-DD学习要点、错题总结以及注意点.html | 按保存约定 | 首页最新入口 |
-| 已被替代的计划和过程证据 | archive/ | 迁移或归档 | 历史资料入口 |
+| 已被替代的计划和过程证据 | history/（旧项目可沿用 archive/） | 迁移或归档 | 历史资料入口 |
 
 生成文件注明数据来源与生成方式。直接编辑生成文件会被覆盖，更新事实应先改对应 JSON。保留用户原答案和证据出处，不能只为满足页面显示而推断事实。skill 文件及模板不存放本课程的具体学习状态。
 
 ## 数据字段
 
-- course：schema_version、id、title、goal、timezone、target、time_policy、profile、save_policy、cycle、modules、stages、responsibilities，可选 ocr_policy（成本策略、资料范围、单批准备上限、费用上限）。这是计划偏好，不是付费执行授权。期限和目标分数是计划，不是已取得结果。模块可同时标进度与资料核验状态。
+- course：schema_version、id、title、goal、timezone、target、time_policy、profile、save_policy、cycle、modules、stages、daily_plan、planning、responsibilities，可选 ocr_policy（成本策略、资料范围、单批准备上限、费用上限）。`planning` 记录状态（needs_input／provisional／active）、内部截止日、依据、版本、生效日、修订摘要及容量缺口；`stages` 与 `modules` 各有 planned_start／planned_end，保留可选 baseline_start／baseline_end；模块主线实际结束时可记 actual_mainline_end，剩余复习项另存。`daily_plan` 每日一项，含 date、minutes、module_id（可空）、focus、outcome、sources；休息日 minutes=0 并明确 focus。计划日期、目标分数和预计时长不是已取得的事实。模块可同时标进度与资料核验状态。旧项目缺这些字段时先标待规划，迁移不推造日期。
 - progress：schema_version、updated_at、current（阶段、小结、未完成、下一次入口）、knowledge（id、title、evidence_history、review_status，可选 legacy_summary）、review_queue、mistakes、days、periods、next_session、maintenance。days 的 duration_seconds 允许 null，表示未知，不用预算补齐。若后来补记了可靠场次，duration_seconds 为已确认部分之和，has_unknown_duration=true 保留其他未知部分，视图两者同时展示。维护活动不进入 days。
 - session：id、status（idle／running／paused／ended）、started_at、budget_seconds、deadline_at、pauses、last_checked_at、ended_at、finish_reason、notice_points_seen，可选 closing_windows、review_only、daily_budget_check。本场窗口固定在场次中，加时不重置。预算检查保存具体分钟、累计与覆盖依据；extensions 保留每次加时的检查。时间用含时区 ISO 8601；状态 ended 的核时不产生新的学习时间。闭合场次同时归档进 progress.sessions，以 id 幂等更新。
 - catalogue：schema_version、sources。每个来源有 sha256、page_count、toc_pdf_pages、toc、verified_ranges、pending、ocr，可选 parsed（directory、status、manifest）。toc 条目保留 title、printed_start、pdf_start（未知为 null）、verified；目录已读与正文未读分开。

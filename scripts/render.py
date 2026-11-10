@@ -34,6 +34,52 @@ def table(headers, rows):
     return f'<div class="table-wrap"><table><thead><tr>{head}</tr></thead><tbody>{body}</tbody></table></div>'
 
 
+def planned_window(entry):
+    start, end = entry.get("planned_start"), entry.get("planned_end")
+    if start and end:
+        return f"{start} ～ {end}"
+    return "待规划"
+
+
+def module_deviation(entry):
+    actual = entry.get("actual_mainline_end")
+    planned = entry.get("planned_end")
+    if not actual:
+        return "按当前证据继续核对"
+    if not planned:
+        return "主线结束于 " + actual
+    delta = (date.fromisoformat(actual) - date.fromisoformat(planned)).days
+    if delta > 0:
+        return f"主线 {actual} 结束，较计划晚 {delta} 天；遗留项进入复习"
+    if delta < 0:
+        return f"主线 {actual} 结束，较计划早 {-delta} 天"
+    return "主线按计划于 " + actual + " 结束"
+
+
+def current_plan(course, progress, today):
+    planning = course.get("planning", {})
+    deadline = planning.get("deadline_date")
+    module_id = (progress.get("current", {}).get("module") or "").split(" ", 1)[0]
+    module = next((item for item in course.get("modules", []) if item.get("id") == module_id), None)
+    day = next((item for item in course.get("daily_plan", []) if item.get("date") == today.isoformat()), None)
+    result = ["计划状态：" + {"needs_input": "待补齐目标与期限", "provisional": "暂定", "active": "执行中"}.get(planning.get("status"), "待规划")]
+    if deadline:
+        remaining = (date.fromisoformat(deadline) - today).days
+        result.append("内部计划截止：" + deadline + (f"（剩余 {remaining} 天）" if remaining >= 0 else f"（已过 {-remaining} 天）"))
+    stage = next((item for item in course.get("stages", []) if item.get("planned_start") and item.get("planned_end") and item["planned_start"] <= today.isoformat() <= item["planned_end"]), None)
+    if stage:
+        result.append("日历阶段：" + stage["title"] + "，计划到 " + stage["planned_end"])
+    if module:
+        result.append(module_id + " 时间窗：" + planned_window(module))
+        if module.get("planned_end") and today > date.fromisoformat(module["planned_end"]):
+            result.append("当前模块超过计划截止 " + str((today - date.fromisoformat(module["planned_end"])).days) + " 天，需重排")
+    if day:
+        result.append("今日简纲：" + day.get("focus", "待规划"))
+    elif planning.get("status") in ("active", "provisional") and planning.get("effective_date") and today >= date.fromisoformat(planning["effective_date"]):
+        result.append("今日简纲缺失，开课前需补排")
+    return "；".join(result) + "。"
+
+
 def items(values):
     return "<ul>" + "".join(f"<li>{esc(value)}</li>" for value in values) + "</ul>"
 
@@ -135,7 +181,7 @@ def context_markdown(course, progress, session, root, questions=None):
     command = "python3 " + shlex.quote(str(script)) + " --root . build"
     lines = ["# 学习上下文", "", "由 data/progress.json 与课程配置生成。更新事实后运行 `" + command + "`；本页不保留过期状态快照。", "",
              f"最后更新：{progress['updated_at']}。课堂状态：{session_summary(session)}", "",
-             "## 当前目标与位置", "", course["goal"], "", current.get("stage", "尚未开始"), "", current.get("summary", "尚无作答证据"), "", "## 最新证据", ""]
+             "## 当前目标与位置", "", course["goal"], "", current.get("stage", "尚未开始"), "", current_plan(course, progress, current_time(course["timezone"]).date()), "", current.get("summary", "尚无作答证据"), "", "## 最新证据", ""]
     for entry in progress.get("knowledge", []):
         lines.append("- " + entry["title"] + "：" + knowledge_text(entry, questions))
     lines += ["", "## 待复查与未完成", ""]
@@ -161,7 +207,10 @@ def context_markdown(course, progress, session, root, questions=None):
 
 def outline_markdown(course, progress):
     session = progress["next_session"]
+    today = current_time(course["timezone"]).date()
+    next_day = next((item for item in sorted(course.get("daily_plan", []), key=lambda item: item["date"]) if item["date"] >= today.isoformat() and item.get("minutes", 0) > 0), None)
     lines = ["# 下次学习小纲", "", "由 data/progress.json 的 next_session 生成。以下是计划，尚未上课、未开始计时。", "",
+             "## 计划依据", "", (next_day["date"] + "：" + next_day["focus"] + "；" + next_day.get("outcome", "成果待细化")) if next_day else "每日简纲待规划；开课前先核对课程期限和当日时间。", "",
              "## 接续", "", session.get("connection", "开课时确定"), "", "## 目标", ""]
     lines += ["- " + value for value in session.get("objectives", [])]
     lines += ["", "## 预算与起止", "", session.get("budget_note", "按用户当次可用时间确定"), "", "实际开始与截止在正式开课前核时填写。", "", "## 资料与核验", ""]
@@ -238,19 +287,31 @@ def heatmap(progress, today):
     return "".join(result)
 
 
-def responsibility_rows():
+def responsibility_rows(root):
+    history = "history/" if (root / "history").is_dir() else "archive/"
     return [("目标／预算／偏好", "data/course.json", "备课、计划调整", "用户调整或周期复盘"),
             ("进度／错题／小纲", "data/progress.json", "每次开课与收尾", "真实作答与重要订正后"),
             ("当前计时", "data/session.json", "每次教学回复前", "核时、明确暂停与结束"),
             ("目录／页码／解析", "materials/catalogue.json", "资料准备与相关章节备课", "目录与页段核验后"),
             ("题源与曝光", "data/questions.json", "出题与阶段测试前", "收录、展示、提示、作答后"),
             ("每日原文", "records/", "复习与证据回看", "按保存约定"),
-            ("历史方案", "archive/", "需要追溯时", "归档时")]
+            ("历史方案", history, "需要追溯时", "归档时")]
 
 
 def plan_page(course, progress, catalogue):
     content = '<h2 id="goal">目标与时间</h2><p>' + esc(course["goal"]) + '</p>'
     content += items(course.get("target", {}).get("notes", []))
+    planning = course.get("planning", {})
+    content += '<h3>整体规划与当前偏差</h3><p>' + esc(current_plan(course, progress, current_time(course["timezone"]).date())) + '</p>'
+    if planning.get("deadline_basis"):
+        content += '<p class="meta">截止依据：' + esc(planning["deadline_basis"]) + '；版本 ' + esc(planning.get("revision", "待规划")) + '；更新于 ' + esc(planning.get("updated_at", "待规划")) + '。</p>'
+    if planning.get("revisions"):
+        content += '<p class="meta">最近调整：' + esc(planning["revisions"][-1].get("summary", "未说明")) + '</p>'
+    if planning.get("capacity_issues"):
+        content += '<h3>时间容量待解决</h3>' + items(planning["capacity_issues"])
+    daily = course.get("daily_plan", [])
+    if daily:
+        content += '<p class="meta">已排 ' + str(len(daily)) + ' 个自然日、合计 ' + str(sum(day.get("minutes", 0) for day in daily)) + ' 分钟计划学习时间；实际投入与掌握情况以下方记录和作答证据为准。</p>'
     policy = course["time_policy"]
     content += table(["项目", "当前约定"], [[esc(k), esc(v)] for k, v in [
         ("工作日", str(policy.get("weekday_minutes") or "开课时确认") + " 分钟"),
@@ -259,8 +320,12 @@ def plan_page(course, progress, catalogue):
         ("新题截止", f"本段结束前 {policy['stop_questions_before_end_minutes']} 分钟"),
         ("截止", "实际核时；未完成顺延，具体加时需用户明确要求")]])
     content += '<h2 id="route">课程路线</h2><p class="meta">模块顺序来自现有备考路线；教材对应关系按目录初始化。具体能力目标由每次小纲落实，正文未读部分保留待核验。</p>'
-    content += table(["模块", "内容", "前置与状态", "教材依据"], [[esc(m["id"] + " " + m["title"]), esc("；".join(m.get("topics", []))), esc(m.get("status", "未学") + "；前置：" + m.get("prerequisite", "无")), esc(m.get("source_note", "资料待补"))] for m in course.get("modules", [])])
-    content += '<h2 id="stages">阶段目标</h2>' + table(["阶段", "完成标准", "当前安排"], [[esc(s["title"]), esc(s["goal"]), esc(s["status"])] for s in course.get("stages", [])])
+    content += table(["模块", "计划时间窗", "实际对照", "内容", "前置与状态", "教材依据"], [[esc(m["id"] + " " + m["title"]), esc(planned_window(m)), esc(module_deviation(m)), esc("；".join(m.get("topics", []))), esc(m.get("status", "未学") + "；前置：" + m.get("prerequisite", "无")), esc(m.get("source_note", "资料待补"))] for m in course.get("modules", [])])
+    content += '<h2 id="stages">阶段目标</h2>' + table(["阶段", "计划时间窗", "完成标准", "当前安排"], [[esc(s["title"]), esc(planned_window(s)), esc(s["goal"]), esc(s["status"])] for s in course.get("stages", [])])
+    upcoming = [day for day in sorted(course.get("daily_plan", []), key=lambda item: item["date"]) if day["date"] >= current_time(course["timezone"]).date().isoformat()][:14]
+    content += '<h2 id="daily">近期每日简纲</h2>'
+    content += table(["日期", "分钟", "主线", "当日成果"], [[esc(day["date"]), esc(day.get("minutes", "待确认")), esc(day.get("focus", "待细化")), esc(day.get("outcome", "待细化"))] for day in upcoming]) if upcoming else '<p>尚未排出每日简纲。</p>'
+    content += '<p>' + link("schedule.html", "查看完整每日计划") + '</p>'
     content += '<h2 id="imports">用户解析结果</h2><p>自行解析 PDF 后，把工具导出的完整文件夹放入对应目录，保留正文及图片、表格素材的相对层级，无需统一改名或填写元数据。放好后告诉 Agent“解析结果放好了”，Agent 会读取并建立章节索引，后续按小纲读取。</p>'
     imports = []
     for source in catalogue.get("sources", []):
@@ -299,7 +364,20 @@ def plan_page(course, progress, catalogue):
     if course.get("historical_plan"):
         content += ' · ' + link(course["historical_plan"], "原始长期计划（历史）")
     content += '</p>'
-    return page("课程计划与资料大纲", course["title"], content, [("index.html", "返回进度首页"), ("#goal", "目标与预算"), ("#route", "课程路线"), ("#stages", "阶段目标"), ("#imports", "自行解析导入"), ("#ocr", "PDF处理安排"), ("#materials", "教材与目录"), ("#sources", "题源状态")], footer="由课程配置和资料索引生成；当前学习位置以最新作答证据为准。")
+    return page("课程计划与资料大纲", course["title"], content, [("index.html", "返回进度首页"), ("#goal", "目标与预算"), ("#route", "课程路线"), ("#stages", "阶段目标"), ("#daily", "每日简纲"), ("#imports", "自行解析导入"), ("#ocr", "PDF处理安排"), ("#materials", "教材与目录"), ("#sources", "题源状态")], footer="由课程配置和资料索引生成；计划与实际分开，当前学习位置以最新作答证据为准。")
+
+
+def schedule_page(course, progress):
+    planning = course.get("planning", {})
+    days = {day["date"]: day for day in progress.get("days", [])}
+    content = '<h2>整体目标</h2><p>' + esc(course["goal"]) + '</p><p>' + esc(current_plan(course, progress, current_time(course["timezone"]).date())) + '</p>'
+    if planning.get("deadline_basis"):
+        content += '<p class="meta">' + esc(planning["deadline_basis"]) + '</p>'
+    content += '<h2>逐日简纲</h2>'
+    planned = sorted(course.get("daily_plan", []), key=lambda item: item["date"])
+    rows = [[esc(day["date"]), esc(day.get("minutes", "待确认")), esc(day.get("module_id") or ("综合训练" if day.get("minutes", 0) else "休息／缓冲")), esc(day.get("focus", "待细化")), esc(day.get("outcome", "待细化")), esc("有学习记录" if day["date"] in days else "计划，尚无学习记录")] for day in planned]
+    content += table(["日期", "计划分钟", "模块", "简纲", "当日成果", "实际记录"], rows) if rows else '<p>尚未排出每日简纲。</p>'
+    return page("每日学习计划", course["title"], content, [("index.html", "返回进度首页"), ("plan.html", "阶段与课程路线")], footer="每日简纲是计划，不表示已经学习；变更目标或时间后更新版本和剩余安排。")
 
 
 def review_page(course, progress):
@@ -346,10 +424,10 @@ def home_page(root, course, progress, session, catalogue, context, outline, ques
     unknown = sum(d.get("duration_seconds") is None or d.get("has_unknown_duration", False) for d in days)
     current = progress["current"]
     content = '<div class="stats">' + ''.join(f'<div><strong>{esc(value)}</strong><span>{esc(label)}</span></div>' for value, label in [(str(len(days)), "有记录的学习日"), (duration(known), "已确认课堂用时"), (str(unknown) + " 天", "存在未知时长"), (current.get("module", "待确认"), "当前模块")]) + '</div>'
-    content += '<section id="current"><h2>现在学到哪里</h2><p>' + esc(current.get("summary", "尚无作答证据")) + '</p><div class="notice">' + esc(session_summary(session)) + '</div></section>'
+    content += '<section id="current"><h2>现在学到哪里</h2><p>' + esc(current_plan(course, progress, current_time(course["timezone"]).date())) + '</p><p>' + esc(current.get("summary", "尚无作答证据")) + '</p><div class="notice">' + esc(session_summary(session)) + '</div></section>'
     today = current_time(course["timezone"]).date()
     content += '<section id="activity"><h2>学习日历 <span class="tag">' + str(today.year) + '</span></h2>' + heatmap(progress, today) + '</section>'
-    content += '<section id="next"><h2>下一次学习</h2><p>' + esc(progress["next_session"].get("connection", "开课时确定")) + '</p>' + items(progress["next_session"].get("objectives", [])) + '<p>' + esc(progress["next_session"].get("budget_note", "")) + '</p><p>' + link("records/下次学习小纲.md", "阅读完整小纲") + ' · ' + link("plan.html", "课程计划与教材目录") + ' · ' + link("review.html", "周期复习与错题本") + '</p></section>'
+    content += '<section id="next"><h2>下一次学习</h2><p>' + esc(progress["next_session"].get("connection", "开课时确定")) + '</p>' + items(progress["next_session"].get("objectives", [])) + '<p>' + esc(progress["next_session"].get("budget_note", "")) + '</p><p>' + link("records/下次学习小纲.md", "阅读完整小纲") + ' · ' + link("plan.html", "阶段与课程路线") + ' · ' + link("schedule.html", "每日计划") + ' · ' + link("review.html", "周期复习与错题本") + '</p></section>'
     question_list = questions or []
     lookup = {question["id"]: question for question in question_list}
     content += '<section id="progress"><h2>知识进度与作答证据</h2>' + table(["内容", "各维度最新证据", "复查安排", "证据与历史"], knowledge_rows(progress.get("knowledge", []), lookup))
@@ -370,16 +448,17 @@ def home_page(root, course, progress, session, catalogue, context, outline, ques
             texts.append((path, (root / path).read_text(encoding="utf-8")))
     for path, text in texts:
         content += '<details><summary>' + esc(Path(path).name) + '</summary><p>' + link(path, "打开原文件") + '</p><pre>' + esc(text) + '</pre></details>'
-    content += '<details><summary>职责与文件来源</summary>' + table(["职责", "权威来源", "读取时机", "更新时机"], [[esc(a), link(b, b), esc(c), esc(d)] for a, b, c, d in responsibility_rows()]) + '</details></section>'
+    content += '<details><summary>职责与文件来源</summary>' + table(["职责", "权威来源", "读取时机", "更新时机"], [[esc(a), link(b, b), esc(c), esc(d)] for a, b, c, d in responsibility_rows(root)]) + '</details></section>'
     content += '<section id="materials"><h2>资料原件</h2>' + '<p>' + ' · '.join(link(s["path"], s["title"]) for s in catalogue.get("sources", [])) + '</p><p>' + link("materials/catalogue.json", "目录与解析状态") + ' · ' + link("data/course.json", "课程配置") + ' · ' + link("data/progress.json", "进度原数据") + '</p></section>'
     content += '<p>自行解析 PDF：' + link("plan.html#imports", "查看每份资料的解析结果存放目录与导入说明") + '。</p>'
+    history_dir = root / ("history" if (root / "history").is_dir() else "archive")
     content += '<section id="archive"><h2>历史与验证</h2><ul>'
-    for path in sorted((root / "archive").glob("*")):
+    for path in sorted(history_dir.glob("*")):
         if path.is_file() and path.suffix in (".md", ".html"):
             content += '<li>' + link(path.relative_to(root), path.stem) + '</li>'
     content += '</ul><p class="meta">历史文件保留当时的说明，当前安排以本页与最新数据为准。</p></section>'
     footer = '<p>本地阅读：在本项目根目录运行</p><pre>python3 -m http.server 8998 --bind 127.0.0.1</pre><p>' + link("http://127.0.0.1:8998/", "打开本地学习进度") + '。停止服务可在终端按 Ctrl+C。</p><p>页面由课程、进度、计时和资料索引生成；资料维护与脚本验证不计为课堂学习。</p>'
-    return page(course["title"], course["goal"], content, [("#current", "当前位置"), ("#activity", "学习日历"), ("#next", "下一次学习"), ("#progress", "知识进度"), ("#records", "学习记录"), ("review.html", "周期错题本"), ("plan.html", "课程与大纲"), ("#documents", "正文与职责"), ("#archive", "历史与验证")], eyebrow="学习进度 · " + str(current.get("latest_day") or "尚未开课"), footer=footer)
+    return page(course["title"], course["goal"], content, [("#current", "当前位置"), ("#activity", "学习日历"), ("#next", "下一次学习"), ("#progress", "知识进度"), ("#records", "学习记录"), ("review.html", "周期错题本"), ("plan.html", "课程与大纲"), ("schedule.html", "每日计划"), ("#documents", "正文与职责"), ("#archive", "历史与验证")], eyebrow="学习进度 · " + str(current.get("latest_day") or "尚未开课"), footer=footer)
 
 
 def render_outputs(root):
@@ -394,6 +473,7 @@ def render_outputs(root):
     return {"学习上下文.md": context, "学习计时.md": timer_markdown(session, course["time_policy"]),
             "materials/目录索引.md": material_index_markdown(catalogue),
             "records/下次学习小纲.md": outline, "plan.html": plan_page(course, progress, catalogue),
+            "schedule.html": schedule_page(course, progress),
             "review.html": review_page(course, progress),
             "index.html": home_page(root, course, progress, session, catalogue, context, outline, questions)}
 
@@ -430,14 +510,15 @@ def initialize(root, title, goal, timezone):
     ZoneInfo(timezone)
     if (root / "data/course.json").exists():
         raise ValueError("项目已存在，不覆盖课程与真实进度")
-    for name in ("data", "materials", "materials/parsed", "records", "archive"):
+    for name in ("data", "materials", "materials/parsed", "records", "history"):
         (root / name).mkdir(parents=True, exist_ok=True)
     write_json(root, "data/course.json", {"schema_version": 1, "id": root.name, "title": title, "goal": goal, "timezone": timezone,
         "target": {"notes": ["目标期限、基础和资料情况按用户信息填写；未确认的内容保留未确认。"]},
         "time_policy": {"weekday_minutes": None, "weekend_minutes": None, "stop_concepts_before_end_minutes": 10, "stop_questions_before_end_minutes": 5, "notice_elapsed_minutes": []},
         "profile": {"teaching_needs": []}, "save_policy": {"daily_html_note": "用户要求保存时生成每日HTML，进度与错题每次更新。"},
         "ocr_policy": {"mode": "cost_aware", "paid_compute": "batch_after_sample", "source_ids": [], "max_batch_pages": 12, "budget_limit": None, "currency": None},
-        "cycle": {"kind": "weekly", "review_weekday": 6}, "modules": [], "stages": []})
+        "cycle": {"kind": "weekly", "review_weekday": 6}, "modules": [], "stages": [], "daily_plan": [],
+        "planning": {"status": "needs_input", "deadline_date": None, "deadline_basis": "待用户确认", "revision": 0, "effective_date": None, "updated_at": None, "revisions": []}})
     try:
         local_skill = (SKILL_DIRECTORY / "SKILL.md").relative_to(root).as_posix()
     except ValueError:
