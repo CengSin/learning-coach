@@ -7,6 +7,13 @@ from pathlib import Path
 
 from common import current_time, duration, parse_time, read_json, write_json, write_text
 
+NEXT_ACTIONS = {
+    "learn": "继续主线；当日简纲完成后接下一计划日的内容，不因目标提前完成而收尾",
+    "consolidate": "不再引入新概念；完成当前题、短综合或闭卷复述",
+    "wrap_up": "不再发新题；总结并准备收尾",
+    "close_now": "已到截止，立即收尾",
+}
+
 
 def elapsed(session, at):
     if session.get("status") == "idle" or not session.get("started_at"):
@@ -49,7 +56,8 @@ def snapshot(session, policy, at):
             "started_at": session.get("started_at"), "deadline_at": session.get("deadline_at"),
             "closing_windows": {key: windows.get(key, default) for key, default in
                                 (("stop_concepts_before_end_minutes", 10), ("stop_questions_before_end_minutes", 5))},
-            "review_only": session.get("review_only", False)}
+            "review_only": session.get("review_only", False),
+            "next_action": NEXT_ACTIONS.get(phase, "当前没有进行中的场次")}
 
 
 def transition(session, action, policy, at, minutes=None, reason=None, *, concept_window=None, question_window=None, review_only=False):
@@ -233,6 +241,7 @@ def main():
     parser.add_argument("--concept-window-minutes", type=float)
     parser.add_argument("--question-window-minutes", type=float)
     parser.add_argument("--review-only", action="store_true")
+    parser.add_argument("--user-stop", action="store_true", help="用户明确要求提前结束（休息、有事、疲惫）时才可在预算未用完前收尾")
     args = parser.parse_args()
     root = Path(args.root).resolve()
     course = read_json(root, "data/course.json")
@@ -243,6 +252,11 @@ def main():
             raise ValueError("预算覆盖只适用于 start 和 extend")
         seen_before = set(session.get("notice_points_seen", []))
         previous = session
+        if args.action == "finish" and not args.user_stop:
+            early = snapshot(session, course["time_policy"], at)
+            if early["status"] == "running" and early["phase"] in ("learn", "consolidate") and not session.get("review_only"):
+                raise ValueError("预算未用完：剩余 " + duration(early["remaining_seconds"]) + "。按主线继续，当日简纲完成则接下一计划日的内容；"
+                                 "单元闭卷复述不是当天收尾。只有用户明确要求停止时加 --user-stop 并在 --reason 写明用户原话")
         if args.action != "status":
             session = transition(session, args.action, course["time_policy"], at, args.minutes, args.reason,
                                  concept_window=args.concept_window_minutes, question_window=args.question_window_minutes,
