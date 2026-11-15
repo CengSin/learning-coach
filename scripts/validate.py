@@ -10,6 +10,7 @@ from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
 from common import parse_time, project_path, read_json
+from depth import validate_depth_plan
 from knowledge import accuracy_report, validate_knowledge
 from render import render_outputs
 from session_clock import elapsed
@@ -128,6 +129,7 @@ def validate(root, check_generated=True, *, strict_materials=False, quick=False)
         questions = read_json(root, "data/questions.json")
         errors.extend(validate_knowledge(root, progress.get("knowledge", [])))
         errors.extend(validate_course_plan(course))
+        errors.extend(validate_depth_plan(course, progress))
         policy = course["time_policy"]
         for key in ("weekday_minutes", "weekend_minutes"):
             limit = policy.get(key)

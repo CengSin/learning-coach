@@ -13,6 +13,7 @@ from zoneinfo import ZoneInfo
 from unittest.mock import patch
 
 from common import read_json, write_json, write_text
+from depth import DEFAULT_LEVELS, depth_markdown, validate_depth_plan
 from pdf_pages import selected_pages
 from scan_materials import scan_materials
 from knowledge import (HISTORY_NOTICE, accuracy_report, assessment_state, independently_checked,
@@ -59,6 +60,17 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(snapshot(updated, POLICY, START + timedelta(minutes=23))["remaining_seconds"], 37 * 60)
         with self.assertRaises(ValueError):
             transition(updated, "start", POLICY, START + timedelta(minutes=23), minutes=60)
+
+    def test_finish_while_paused_excludes_pause_without_resuming(self):
+        session = self.started(120)
+        pause_at = START + timedelta(minutes=37, seconds=50)
+        paused = transition(session, "pause", POLICY, pause_at, reason="用户暂停")
+        finish_at = pause_at + timedelta(hours=2, minutes=8)
+        ended = transition(paused, "finish", POLICY, finish_at, reason="用户今天到此结束")
+        self.assertEqual(ended["status"], "ended")
+        self.assertEqual(elapsed(ended, finish_at), 37 * 60 + 50)
+        self.assertEqual(ended["pauses"][-1]["end"], finish_at.isoformat())
+        self.assertEqual(ended["deadline_at"], (START + timedelta(minutes=120) + (finish_at - pause_at)).isoformat())
 
     def test_deadline_boundaries(self):
         session = self.started()
@@ -899,6 +911,127 @@ class ClassLogTests(unittest.TestCase):
             refused = self.run_script(root, "render.py", "daily", "--date", "2026-10-16", "--content", str(fragment), check=False)
             self.assertNotEqual(refused.returncode, 0)
             self.run_script(root, "render.py", "daily", "--date", "2026-10-16", "--content", str(fragment), "--replace")
+
+
+class DepthPlanTests(unittest.TestCase):
+    def fixture(self, level="了解"):
+        policy = {"enabled": True,
+                  "groups": [{"id": "group", "title": "基础范围", "minutes": 60}],
+                  "topics": [{"id": "topic", "group_id": "group", "title": "一个连贯主题",
+                              "outline_object": "基础原理", "outline_verb": level,
+                              "outline_source": "资料甲第2节", "level": level}]}
+        plan = {"available_minutes": 60, "overhead_minutes": 5,
+                "items": [{"topic_id": "topic", "phase": "first_pass", "minutes": 15,
+                           "lectures": 1, "exercises": 1, "goal": "识别本例的输入输出",
+                           "stop_when": "达到目标或任一上限后转下一主题"}]}
+        return {"depth_policy": policy}, {"next_session": {"depth_plan": plan}}
+
+    def test_legacy_and_defaults_are_read_only(self):
+        self.assertEqual(validate_depth_plan({}, {"next_session": {}}), [])
+        self.assertEqual(depth_markdown({}, {"next_session": {}}), [])
+        course, progress = self.fixture()
+        before = copy.deepcopy((course, progress, DEFAULT_LEVELS))
+        self.assertEqual(validate_depth_plan(course, progress), [])
+        self.assertIn("资料甲第2节", "\n".join(depth_markdown(course, progress)))
+        self.assertEqual((course, progress, DEFAULT_LEVELS), before)
+
+    def test_split_topics_cannot_exceed_parent_budget(self):
+        course, progress = self.fixture()
+        policy = course["depth_policy"]
+        policy["groups"][0]["minutes"] = 15
+        other = copy.deepcopy(policy["topics"][0])
+        other["id"] = "other"
+        policy["topics"].append(other)
+        self.assertTrue(any("父级预算" in error for error in validate_depth_plan(course, progress)))
+
+    def test_duplicate_items_share_limits_and_prior_usage(self):
+        course, progress = self.fixture()
+        plan = progress["next_session"]["depth_plan"]
+        item = plan["items"][0]
+        item.update(minutes=3, lectures=0, exercises=0,
+                    used_before=dict(minutes=10, lectures=1, exercises=1, sessions=1, source="records/class-log/旧日.jsonl"))
+        other = copy.deepcopy(item)
+        other["minutes"] = 2
+        plan["items"].append(other)
+        self.assertEqual(validate_depth_plan(course, progress), [])
+        other["minutes"] = 3
+        self.assertTrue(any("累计超过" in error for error in validate_depth_plan(course, progress)))
+        other["minutes"] = 2
+        other["used_before"]["source"] = "另一个出处"
+        self.assertTrue(any("快照不一致" in error for error in validate_depth_plan(course, progress)))
+
+    def test_independent_task_and_lecture_caps(self):
+        for field, value in (("lectures", 2), ("exercises", 2), ("minutes", 16)):
+            with self.subTest(field=field):
+                course, progress = self.fixture()
+                progress["next_session"]["depth_plan"]["items"][0][field] = value
+                self.assertTrue(any("累计超过" in error for error in validate_depth_plan(course, progress)))
+
+    def test_mapping_and_custom_limits_need_reasons(self):
+        course, progress = self.fixture("熟悉")
+        topic = course["depth_policy"]["topics"][0]
+        topic["outline_verb"] = "理解"
+        self.assertTrue(any("mapping_reason" in error for error in validate_depth_plan(course, progress)))
+        topic["mapping_reason"] = "保留原词，暂用熟悉档的资源上限"
+        self.assertEqual(validate_depth_plan(course, progress), [])
+        course["depth_policy"]["levels"] = {"熟悉": {"minutes": 30}}
+        self.assertTrue(any("override_reason" in error for error in validate_depth_plan(course, progress)))
+        course["depth_policy"]["override_reason"] = "用户指定较长的本课程主题窗口"
+        self.assertEqual(validate_depth_plan(course, progress), [])
+
+    def test_review_is_separate_bounded_and_conditional(self):
+        course, progress = self.fixture()
+        item = progress["next_session"]["depth_plan"]["items"][0]
+        item.update(phase="practice", minutes=10, lectures=0)
+        self.assertTrue(any("复查须有" in error for error in validate_depth_plan(course, progress)))
+        item["review_reason"] = "原独立题有误，核查该断点"
+        self.assertEqual(validate_depth_plan(course, progress), [])
+        item["minutes"] = 11
+        self.assertTrue(any("单次复查" in error for error in validate_depth_plan(course, progress)))
+        item["minutes"] = 10
+        progress["next_session"]["depth_plan"]["items"].append(copy.deepcopy(item))
+        self.assertTrue(any("累计超过" in error for error in validate_depth_plan(course, progress)))
+
+    def test_day_packing_and_malformed_fields(self):
+        course, progress = self.fixture()
+        plan = progress["next_session"]["depth_plan"]
+        plan["available_minutes"] = 19
+        self.assertTrue(any("本次可用" in error for error in validate_depth_plan(course, progress)))
+        for value in (True, -1, float("nan"), float("inf"), "15", None):
+            with self.subTest(value=value):
+                course, progress = self.fixture()
+                progress["next_session"]["depth_plan"]["items"][0]["minutes"] = value
+                self.assertTrue(validate_depth_plan(course, progress))
+        for field, value in (("groups", {}), ("topics", [None]), ("levels", [])):
+            with self.subTest(field=field):
+                course, progress = self.fixture()
+                course["depth_policy"][field] = value
+                self.assertTrue(validate_depth_plan(course, progress))
+
+    def test_full_project_render_and_validation_in_temporary_root(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            initialize(root, "临时课程", "深度预算验证", "Asia/Shanghai")
+            configured, planned = self.fixture()
+            course = read_json(root, "data/course.json")
+            progress = read_json(root, "data/progress.json")
+            course.update(configured)
+            progress["next_session"].update(planned["next_session"])
+            write_json(root, "data/course.json", course)
+            write_json(root, "data/progress.json", progress)
+            before = {name: (root / name).read_bytes() for name in ("data/course.json", "data/progress.json", "data/session.json")}
+            outputs = render_outputs(root)
+            outline = outputs["records/下次学习小纲.md"]
+            self.assertIn("教学深度与额度", outline)
+            self.assertIn("一个连贯主题", outline)
+            self.assertIn("累计上限 15分／1讲／1题", outline)
+            self.assertIn("基础范围≤60分钟", outline)
+            self.assertIn("达到目标或任一上限", outline)
+            for name, content in outputs.items():
+                write_text(root / name, content)
+            report = validate(root)
+            self.assertTrue(report["ok"], report)
+            self.assertEqual(before, {name: (root / name).read_bytes() for name in before})
 
 
 if __name__ == "__main__":

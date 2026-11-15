@@ -11,6 +11,7 @@ from urllib.parse import quote
 from zoneinfo import ZoneInfo
 
 from common import current_time, duration, parse_time, project_path, read_json, write_json, write_text
+from depth import depth_markdown
 from knowledge import HISTORY_NOTICE, evidence_label, knowledge_view, mastery_basis, migrate_knowledge, pending_facts
 from session_clock import elapsed, timer_markdown
 
@@ -215,6 +216,7 @@ def outline_markdown(course, progress):
     lines += ["- " + value for value in session.get("objectives", [])]
     lines += ["", "## 预算与起止", "", session.get("budget_note", "按用户当次可用时间确定"), "", "实际开始与截止在正式开课前核时填写。", "", "## 资料与核验", ""]
     lines += ["- " + value for value in session.get("sources", [])]
+    lines += depth_markdown(course, progress)
     lines += ["", "## 本次关键事实", "", "| 内容 | 依据等级 | 出处位置 |", "|---|---|---|"]
     cell = lambda value: str(value or "未确认").replace("|", "／").replace("\n", " ")
     facts = session.get("key_facts", [])

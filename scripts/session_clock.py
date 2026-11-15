@@ -120,7 +120,7 @@ def transition(session, action, policy, at, minutes=None, reason=None, *, concep
             raise ValueError("结束场次需要已开始的场次和真实收尾原因")
         if state == "paused":
             pause = result["pauses"][-1]
-            result["deadline_at"] = (parse_time(result["deadline_at"]) + at - parse_time(pause["start"])).isoformat()
+            result["deadline_at"] = (parse_time(result["deadline_at"]) + (at - parse_time(pause["start"]))).isoformat()
             pause["end"] = at.isoformat()
         result["ended_at"] = at.isoformat()
         result["last_checked_at"] = at.isoformat()
