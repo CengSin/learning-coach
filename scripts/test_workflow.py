@@ -516,7 +516,8 @@ class AccuracyTests(unittest.TestCase):
         self.assertIn("UNCHECKED_SELF_AUTHORED", self.codes(progress, [question]))
         self.assertEqual(mastery_basis(progress, [question])["denominator"], 0)
         self.assertNotIn("作答：独立正确", knowledge_view(progress["knowledge"][0], {"q1": question})["status"])
-        for method in ("工具复算", "另一种解法：逆向检查", "对照教材原页／官方答案：资料甲，第2章",
+        for method in ("工具复算", "另一种解法：逆向检查", "对照教材解析正文：资料甲，第2章，materials/parsed/资料甲.md",
+                       "对照教材原页／官方答案：资料甲，第2章",
                        "对照教材原页／官方答案：官方题集，第3题及官方答案第8页"):
             question["independent_check"] = {"method": method, "result": "一致"}
             self.assertTrue(independently_checked(question))
@@ -579,12 +580,13 @@ class AccuracyTests(unittest.TestCase):
         self.assertNotIn("HISTORICAL_UNVERIFIED", codes)
 
     def test_confirmed_key_fact_location_requires_named_source_and_position(self):
-        for basis in ("已对照教材原页", "来自官方题目答案"):
+        for basis in ("已核对教材解析正文", "已对照教材原页", "来自官方题目答案"):
             for location in ("教材", "第2章", None, "资料甲，第2章", "官方题集，第3题"):
                 with self.subTest(basis=basis, location=location):
                     progress = self.progress()
                     progress["next_session"]["key_facts"] = [{"content": "关键关系", "basis": basis, "location": location}]
                     codes = self.codes(progress, [])
+                    self.assertNotIn("KEY_FACT_BASIS", codes)
                     self.assertEqual("KEY_FACT_LOCATION" in codes, location not in ("资料甲，第2章", "官方题集，第3题"))
         progress["next_session"]["key_facts"][0].update(basis="模型自己的知识，未核对", location="待定位")
         self.assertNotIn("KEY_FACT_LOCATION", self.codes(progress, []))
@@ -592,6 +594,7 @@ class AccuracyTests(unittest.TestCase):
     def test_independent_check_accepts_both_colons_for_all_methods(self):
         progress = self.progress(self.event())
         for method, description in (("工具复算", "重新计算"), ("另一种解法", "逆向验证"),
+                                    ("对照教材解析正文", "资料甲，第2章，materials/parsed/资料甲.md"),
                                     ("对照教材原页／官方答案", "资料甲，第2章")):
             for colon in ("：", ":"):
                 with self.subTest(method=method, colon=colon):
@@ -618,6 +621,25 @@ class AccuracyTests(unittest.TestCase):
                     question["independent_check"]["result"] = result
                     self.assertEqual(mastery_basis(progress, [question])["denominator"], 0)
                     self.assertNotIn("REFERENCE_CHECK_LOCATION", self.codes(progress, [question]))
+
+    def test_parsed_reference_requires_location_and_resolved_result(self):
+        progress = self.progress(self.event())
+        prefix = "对照教材解析正文"
+        for details in ("", "：", "：资料甲", "：第2章", "：资料甲，待定位"):
+            with self.subTest(details=details):
+                question = self.question(check={"method": prefix + details, "result": "一致"})
+                self.assertFalse(independently_checked(question))
+                self.assertIn("REFERENCE_CHECK_LOCATION", self.codes(progress, [question]))
+                self.assertEqual(mastery_basis(progress, [question])["denominator"], 0)
+        for result in ("一致", "待核对", "不一致"):
+            with self.subTest(result=result):
+                question = self.question(check={
+                    "method": prefix + "：资料甲，第2章，materials/parsed/资料甲.md",
+                    "result": result,
+                })
+                self.assertNotIn("REFERENCE_CHECK_LOCATION", self.codes(progress, [question]))
+                self.assertEqual(independently_checked(question), result == "一致")
+                self.assertEqual(mastery_basis(progress, [question])["denominator"], int(result == "一致"))
 
     def test_validate_warns_about_reference_location_even_without_answers(self):
         with tempfile.TemporaryDirectory() as temporary:

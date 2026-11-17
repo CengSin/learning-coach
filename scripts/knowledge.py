@@ -12,10 +12,10 @@ DIMENSIONS = {
 }
 REVIEW_STATUSES = {"待复查", "待隔日检查", "已安排", "已完成"}
 HISTORY_NOTICE = "历史记录，未按新规则核验"
-FACT_BASES = {"已对照教材原页", "来自官方题目答案", "模型自己的知识，未核对", "推断"}
-CONFIRMED_BASES = {"已对照教材原页", "来自官方题目答案"}
+FACT_BASES = {"已核对教材解析正文", "已对照教材原页", "来自官方题目答案", "模型自己的知识，未核对", "推断"}
+CONFIRMED_BASES = {"已核对教材解析正文", "已对照教材原页", "来自官方题目答案"}
 ASSESSMENT_MODES = {"独立作答", "提示后作答", "闭卷复述", "练习"}
-REFERENCE_CHECK_METHOD = "对照教材原页／官方答案"
+REFERENCE_CHECK_METHODS = ("对照教材解析正文", "对照教材原页／官方答案")
 
 
 def question_kind(question):
@@ -39,7 +39,7 @@ def source_location_present(details):
 
 def reference_check_located(method):
     parts = re.split("[：:]", method, maxsplit=1)
-    return len(parts) == 2 and parts[0].strip() == REFERENCE_CHECK_METHOD and source_location_present(parts[1])
+    return len(parts) == 2 and parts[0].strip() in REFERENCE_CHECK_METHODS and source_location_present(parts[1])
 
 
 def independently_checked(question):
@@ -48,7 +48,7 @@ def independently_checked(question):
         return False
     method = re.split("[：:]", check["method"], maxsplit=1)[0].strip()
     valid_method = method in ("工具复算", "另一种解法")
-    if check["method"].strip().startswith(REFERENCE_CHECK_METHOD):
+    if check["method"].strip().startswith(REFERENCE_CHECK_METHODS):
         valid_method = reference_check_located(check["method"])
     return valid_method and check.get("result") == "一致"
 
@@ -199,7 +199,7 @@ def accuracy_report(progress, questions):
     for question in questions:
         check = question.get("independent_check")
         method = check.get("method") if isinstance(check, dict) else None
-        if isinstance(method, str) and method.strip().startswith(REFERENCE_CHECK_METHOD) and not reference_check_located(method):
+        if isinstance(method, str) and method.strip().startswith(REFERENCE_CHECK_METHODS) and not reference_check_located(method):
             warn("REFERENCE_CHECK_LOCATION", f"questions[{question['id']}].independent_check.method",
                  "对照资料的方法须在冒号后写明资料名及章节／页码，或题目和答案出处")
     for entry in progress.get("knowledge", []):
