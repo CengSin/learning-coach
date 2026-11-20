@@ -53,6 +53,33 @@ class WorkflowTests(unittest.TestCase):
     def started(self, minutes=60):
         return transition({"status": "idle"}, "start", POLICY, START, minutes=minutes)
 
+    def test_review_clock_accumulates_across_segments_and_excludes_pause(self):
+        def at(minutes):
+            return START + timedelta(minutes=minutes)
+
+        session = transition({}, "start", POLICY, START, 60, review_minutes=5, segment="review")
+        session = transition(session, "tick", POLICY, at(2), segment="mainline")
+        session = transition(session, "tick", POLICY, at(15), segment="review")
+        session = transition(session, "pause", POLICY, at(16), reason="休息")
+        self.assertEqual(snapshot(session, POLICY, at(25))["review"]["elapsed_seconds"], 180)
+        session = transition(session, "resume", POLICY, at(26))
+        session = transition(session, "tick", POLICY, at(27), segment="review")
+        self.assertEqual(snapshot(session, POLICY, at(28))["review"]["remaining_seconds"], 0)
+        self.assertIn("回顾额度已用完", snapshot(session, POLICY, at(28))["next_action"])
+        session = transition(session, "tick", POLICY, at(29), segment="mainline")
+        self.assertEqual(snapshot(session, POLICY, at(40))["review"]["elapsed_seconds"], 360)
+        self.assertEqual(snapshot(session, POLICY, at(70))["phase"], "close_now")
+
+    def test_review_budget_scope_and_legacy_sessions(self):
+        for budget in (-1, 65, float("nan"), float("inf")):
+            with self.assertRaises(ValueError):
+                transition({}, "start", POLICY, START, 60, review_minutes=budget)
+        with self.assertRaises(ValueError):
+            transition({}, "start", POLICY, START, 60, review_only=True, review_minutes=5)
+        self.assertNotIn("review", snapshot(self.started(), POLICY, START))
+        session = transition({}, "start", POLICY, START, 60, review_minutes=0)
+        self.assertEqual(snapshot(session, POLICY, START)["review"]["remaining_seconds"], 0)
+
     def test_continue_keeps_original_start(self):
         session = self.started()
         updated = transition(session, "tick", POLICY, START + timedelta(minutes=23))
@@ -82,6 +109,43 @@ class WorkflowTests(unittest.TestCase):
         session = self.started(25)
         self.assertEqual(snapshot(session, POLICY, START + timedelta(minutes=17))["phase"], "consolidate")
         self.assertEqual(snapshot(session, POLICY, START + timedelta(minutes=20))["phase"], "wrap_up")
+
+    def test_deadline_mode_keeps_teaching_until_exact_deadline(self):
+        policy = dict(POLICY, end_mode="deadline")
+        session = transition({"status": "idle"}, "start", policy, START, minutes=2)
+        self.assertEqual(session["closing_windows"], {"stop_concepts_before_end_minutes": 0, "stop_questions_before_end_minutes": 0})
+        for seconds, phase in ((0, "learn"), (119, "learn"), (120, "close_now"), (171, "close_now")):
+            info = snapshot(session, POLICY, START + timedelta(seconds=seconds))
+            self.assertEqual(info["end_mode"], "deadline")
+            self.assertEqual(info["phase"], phase)
+            self.assertEqual(info["overtime_seconds"], max(0, seconds - 120))
+        paused = transition(session, "pause", policy, START + timedelta(seconds=30), reason="用户休息")
+        resumed = transition(paused, "resume", policy, START + timedelta(seconds=90))
+        self.assertEqual(snapshot(resumed, policy, START + timedelta(seconds=179))["phase"], "learn")
+        self.assertEqual(snapshot(resumed, policy, START + timedelta(seconds=180))["phase"], "close_now")
+        review = transition({"status": "idle"}, "start", policy, START, minutes=2, review_only=True)
+        self.assertEqual(snapshot(review, policy, START)["phase"], "consolidate")
+
+    def test_end_mode_overrides_and_legacy_windows_are_stable(self):
+        session = transition({"status": "idle"}, "start", dict(POLICY, end_mode="deadline"), START,
+                             minutes=60, end_mode="windows")
+        self.assertEqual(snapshot(session, POLICY, START + timedelta(minutes=55))["phase"], "wrap_up")
+        for mode in ("invalid", False):
+            with self.assertRaises(ValueError):
+                transition({"status": "idle"}, "start", POLICY, START, minutes=60, end_mode=mode)
+        for concepts, questions in ((1, 0), (0, 1), (False, 0)):
+            with self.assertRaises(ValueError):
+                transition({"status": "idle"}, "start", POLICY, START, minutes=60,
+                           end_mode="deadline", concept_window=concepts, question_window=questions)
+        with self.assertRaises(ValueError):
+            transition(session, "tick", POLICY, START, end_mode="deadline")
+        legacy_policy = dict(POLICY, stop_concepts_before_end_minutes=0.01, stop_questions_before_end_minutes=0)
+        legacy = transition({"status": "idle"}, "start", legacy_policy, START, minutes=60)
+        legacy.pop("end_mode")
+        before = copy.deepcopy(legacy)
+        self.assertEqual(snapshot(legacy, dict(POLICY, end_mode="deadline"), START + timedelta(seconds=3599))["phase"], "learn")
+        self.assertEqual(snapshot(legacy, POLICY, START + timedelta(seconds=3600))["phase"], "close_now")
+        self.assertEqual(legacy, before)
 
     def test_pause_requires_reason_and_adjusts_deadline(self):
         session = self.started()
@@ -854,6 +918,20 @@ class ClassLogTests(unittest.TestCase):
         self.run_script(root, "session_clock.py", "start", "--minutes", "30", "--reason", "用户明确本次30分钟", "--override-daily-budget")
         return root
 
+    def test_review_clock_through_class_log(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            initialize(root, "通用课程", "回顾分段", "Asia/Shanghai")
+            self.run_script(root, "session_clock.py", "start", "--minutes", "30", "--review-minutes", "5")
+            def log(*args):
+                result = self.run_script(root, "record.py", "log", "teach", "--knowledge", "k",
+                                         "--summary", "本段讲解", *args)
+                return json.loads(result.stdout)["review"]
+            self.assertTrue(log("--segment", "review")["active"])
+            self.assertTrue(log()["active"])
+            self.assertFalse(log("--segment", "mainline")["active"])
+            self.assertEqual(json.loads(self.run_script(root, "session_clock.py", "status").stdout)["review"]["budget_seconds"], 300)
+
     def test_log_ticks_and_commit_is_idempotent_and_valid(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = self.project(temporary)
@@ -904,6 +982,46 @@ class ClassLogTests(unittest.TestCase):
             self.assertEqual(read_json(root, "data/session.json")["status"], "running")
             done = self.run_script(root, "session_clock.py", "finish", "--user-stop", "--reason", "用户：今天先到这里")
             self.assertEqual(json.loads(done.stdout)["status"], "ended")
+
+    def test_deadline_cli_logs_validates_and_preserves_course(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            initialize(root, "通用课程", "严格到点", "Asia/Shanghai")
+            before = (root / "data/course.json").read_bytes()
+            started = json.loads(self.run_script(root, "session_clock.py", "start", "--minutes", "2", "--end-mode", "deadline").stdout)
+            self.assertEqual(started["end_mode"], "deadline")
+            self.assertGreater(started["remaining_seconds"], 0)
+            failed = self.run_script(root, "session_clock.py", "finish", "--reason", "本段已讲完", check=False)
+            self.assertNotEqual(failed.returncode, 0)
+            logged = json.loads(self.run_script(root, "record.py", "log", "teach", "--knowledge", "k1", "--title", "概念", "--summary", "输入输出关系").stdout)
+            self.assertEqual(logged["end_mode"], "deadline")
+            self.assertEqual(logged["elapsed_seconds"] + logged["remaining_seconds"], 120)
+            self.run_script(root, "session_clock.py", "finish", "--user-stop", "--reason", "用户：今天先到这里")
+            self.run_script(root, "record.py", "commit")
+            self.run_script(root, "render.py", "build")
+            report = json.loads(self.run_script(root, "validate.py").stdout)
+            self.assertTrue(report["ok"], report)
+            self.assertEqual((root / "data/course.json").read_bytes(), before)
+            progress = read_json(root, "data/progress.json")
+            self.assertEqual(progress["sessions"][-1]["end_mode"], "deadline")
+            state = read_json(root, "data/session.json")
+            state["closing_windows"]["stop_concepts_before_end_minutes"] = 1
+            write_json(root, "data/session.json", state)
+            self.assertFalse(validate(root)["ok"])
+
+    def test_wrap_up_does_not_allow_unauthorized_early_finish(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = self.project(temporary)
+            state = read_json(root, "data/session.json")
+            start = datetime.fromisoformat(state["started_at"]) - timedelta(minutes=26)
+            state["started_at"] = start.isoformat()
+            state["deadline_at"] = (start + timedelta(minutes=30)).isoformat()
+            write_json(root, "data/session.json", state)
+            self.assertEqual(json.loads(self.run_script(root, "session_clock.py", "status").stdout)["phase"], "wrap_up")
+            before = (root / "data/session.json").read_bytes()
+            refused = self.run_script(root, "session_clock.py", "finish", "--reason", "进入总结窗口", check=False)
+            self.assertNotEqual(refused.returncode, 0)
+            self.assertEqual((root / "data/session.json").read_bytes(), before)
 
     def test_snapshot_reports_next_action_by_phase(self):
         session = transition({"status": "idle"}, "start", POLICY, START, minutes=60)

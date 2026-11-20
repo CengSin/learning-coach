@@ -74,16 +74,20 @@ def build_entry(args, entry_id, at, session_id):
     return {key: value for key, value in entry.items() if value is not None}
 
 
-def tick(root, course, session, at):
-    from session_clock import snapshot, timer_markdown, transition
+def report_tick(root, course, session, at):
+    from session_clock import snapshot, timer_markdown
     if session.get("status") in ("running", "paused"):
-        session = transition(session, "tick", course["time_policy"], at)
         write_json(root, "data/session.json", session)
         write_text(root / "学习计时.md", timer_markdown(session, course["time_policy"]))
     info = snapshot(session, course["time_policy"], at)
-    return {"phase": info["phase"], "elapsed_minutes": round(info["elapsed_seconds"] / 60, 1),
+    timing = {"phase": info["phase"], "end_mode": info["end_mode"],
+            "elapsed_seconds": info["elapsed_seconds"], "remaining_seconds": info["remaining_seconds"],
+            "elapsed_minutes": round(info["elapsed_seconds"] / 60, 1),
             "remaining_minutes": round(info["remaining_seconds"] / 60, 1),
             "next_action": info["next_action"]}
+    if "review" in info:
+        timing["review"] = info["review"]
+    return timing
 
 
 def find_knowledge(progress, knowledge_id, title=None, *, create=False):
@@ -231,6 +235,9 @@ def main():
     recall.add_argument("--gap", action="append", help="遗漏或错误的关键事实，可重复；全对不填")
     recall.add_argument("--review-status", choices=sorted(REVIEW_STATUSES))
 
+    for kind in (question, teach, answer, recall):
+        kind.add_argument("--segment", choices=("mainline", "review"), help="本轮核时后即将进行的教学分段，省略沿用上一段")
+
     done = actions.add_parser("commit", help="把课堂日志幂等合并进 progress/questions")
     done.add_argument("--date", help="YYYY-MM-DD，默认当前场次或今天")
     actions.add_parser("show", help="查看今天的课堂日志")
@@ -245,11 +252,13 @@ def main():
             entries = read_log(root, day)
             entry_id = "L" + day.replace("-", "") + f"-{len(entries) + 1:03d}"
             entry = build_entry(args, entry_id, at, session.get("id") if session.get("status") in ("running", "paused") else None)
+            from session_clock import transition
+            session = transition(session, "tick", course["time_policy"], at, segment=args.segment)
             path = project_path(root, log_path(day))
             path.parent.mkdir(parents=True, exist_ok=True)
             with path.open("a", encoding="utf-8") as stream:
                 stream.write(json.dumps(entry, ensure_ascii=False) + "\n")
-            print(json.dumps({"logged": entry_id, **tick(root, course, session, at)}, ensure_ascii=False))
+            print(json.dumps({"logged": entry_id, **report_tick(root, course, session, at)}, ensure_ascii=False))
         elif args.action == "commit":
             print(json.dumps(commit(root, args.date or day, at), ensure_ascii=False))
         else:

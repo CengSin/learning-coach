@@ -13,7 +13,7 @@ from common import parse_time, project_path, read_json
 from depth import validate_depth_plan
 from knowledge import accuracy_report, validate_knowledge
 from render import render_outputs
-from session_clock import elapsed
+from session_clock import elapsed, validate_closing_windows
 
 
 class Document(HTMLParser):
@@ -131,6 +131,8 @@ def validate(root, check_generated=True, *, strict_materials=False, quick=False)
         errors.extend(validate_course_plan(course))
         errors.extend(validate_depth_plan(course, progress))
         policy = course["time_policy"]
+        if policy.get("end_mode", "windows") not in ("windows", "deadline"):
+            errors.append("无效课程结束模式")
         for key in ("weekday_minutes", "weekend_minutes"):
             limit = policy.get(key)
             if limit is not None and (isinstance(limit, bool) or not isinstance(limit, (int, float)) or not math.isfinite(limit) or limit < 0):
@@ -163,10 +165,11 @@ def validate(root, check_generated=True, *, strict_materials=False, quick=False)
                 windows = state.get("closing_windows")
                 if windows:
                     concepts, question_window = windows["stop_concepts_before_end_minutes"], windows["stop_questions_before_end_minutes"]
-                    if not all(math.isfinite(value) and value >= 0 for value in (concepts, question_window)) or question_window >= concepts:
-                        errors.append("无效本场收尾窗口")
-                    elif not state.get("review_only") and concepts * 60 >= state["budget_seconds"]:
-                        errors.append("本场收尾窗口占满学习预算")
+                    try:
+                        validate_closing_windows(state.get("end_mode", "windows"), concepts, question_window,
+                                                 state["budget_seconds"], state.get("review_only", False))
+                    except ValueError as error:
+                        errors.append("无效本场收尾窗口：" + str(error))
                 point = state.get("ended_at") or state.get("last_checked_at")
                 if elapsed(state, parse_time(point)) < 0:
                     errors.append("暂停累计超过实际场次")

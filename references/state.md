@@ -23,6 +23,8 @@
 - catalogue：schema_version、sources。每个来源有 sha256、page_count、toc_pdf_pages、toc、verified_ranges、pending、ocr，可选 parsed（directory、status、manifest）。toc 条目保留 title、printed_start、pdf_start（未知为 null）、verified；目录已读与正文未读分开。
 - questions：schema_version、items。id 唯一；provenance、source、answer_source、verification、knowledge_ids、exposure 必须明确。批次未知不推造。
 
+`time_policy.end_mode` 可选 `windows`（默认，按提前窗口收束）或 `deadline`（截止前持续教学，到点收尾）。开场保存本场 `session.end_mode` 与 `closing_windows` 快照；deadline 的本场窗口均为0，不读取课程的提前窗口。旧场次缺模式时沿用原窗口，不因后来课程配置变化改写历史；本场覆盖只在 start 时用 `--end-mode`，不自动迁移真实课程。
+
 ### 教学校验的兼容扩展
 
 字段和资格详见 [accuracy.md](accuracy.md)，保留现有 schema_version，采用可缺省的新增字段：
