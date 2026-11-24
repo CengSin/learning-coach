@@ -56,7 +56,6 @@ class WorkflowTests(unittest.TestCase):
     def test_review_clock_accumulates_across_segments_and_excludes_pause(self):
         def at(minutes):
             return START + timedelta(minutes=minutes)
-
         session = transition({}, "start", POLICY, START, 60, review_minutes=5, segment="review")
         session = transition(session, "tick", POLICY, at(2), segment="mainline")
         session = transition(session, "tick", POLICY, at(15), segment="review")
@@ -360,8 +359,8 @@ class WorkflowTests(unittest.TestCase):
         progress = {"periods": [period]}
         with patch("render.current_time", return_value=START + timedelta(days=3)):
             row = review_schedule(course, progress)[0]
-        self.assertEqual(row["date"], "2026-10-16")
-        self.assertIn("待补复盘", row["status"])
+            self.assertEqual(row["date"], "2026-10-16")
+            self.assertIn("待补复盘", row["status"])
         del period["planned_learning_dates"]
         self.assertEqual(review_schedule(course, progress)[0]["date"], "2026-10-18")
         course["cycle"]["planned_weekdays"] = [0, 2, 4]
@@ -439,11 +438,10 @@ class WorkflowTests(unittest.TestCase):
                 snapshot_period(root, period["id"])
             self.assertEqual((root / "records/periods/2026-W42.json").read_bytes(), before)
 
-
     def parsed_fixture(self, root):
         initialize(root, "测试课程", "测试目标", "Asia/Shanghai")
         directory = root / "materials/parsed/book"
-        directory.mkdir(parents=True)
+        directory.mkdir(parents=True, exist_ok=True)
         body = directory / "正文.md"
         body.write_text("旧正文", encoding="utf-8")
         manifest = {"source_id": "book", "source_sha256": "original-pdf", "files": [
@@ -645,21 +643,21 @@ class AccuracyTests(unittest.TestCase):
 
     def test_confirmed_key_fact_location_requires_named_source_and_position(self):
         for basis in ("已核对教材解析正文", "已对照教材原页", "来自官方题目答案"):
-            for location in ("教材", "第2章", None, "资料甲，第2章", "官方题集，第3题"):
+            for location in ("教材", "第2章", None, "资料甲, 第2章", "官方题集, 第3题"):
                 with self.subTest(basis=basis, location=location):
                     progress = self.progress()
                     progress["next_session"]["key_facts"] = [{"content": "关键关系", "basis": basis, "location": location}]
                     codes = self.codes(progress, [])
                     self.assertNotIn("KEY_FACT_BASIS", codes)
-                    self.assertEqual("KEY_FACT_LOCATION" in codes, location not in ("资料甲，第2章", "官方题集，第3题"))
+                    self.assertEqual("KEY_FACT_LOCATION" in codes, location not in ("资料甲, 第2章", "官方题集, 第3题"))
         progress["next_session"]["key_facts"][0].update(basis="模型自己的知识，未核对", location="待定位")
         self.assertNotIn("KEY_FACT_LOCATION", self.codes(progress, []))
 
     def test_independent_check_accepts_both_colons_for_all_methods(self):
         progress = self.progress(self.event())
         for method, description in (("工具复算", "重新计算"), ("另一种解法", "逆向验证"),
-                                    ("对照教材解析正文", "资料甲，第2章，materials/parsed/资料甲.md"),
-                                    ("对照教材原页／官方答案", "资料甲，第2章")):
+                                    ("对照教材解析正文", "资料甲, 第2章, materials/parsed/资料甲.md"),
+                                    ("对照教材原页／官方答案", "资料甲, 第2章")):
             for colon in ("：", ":"):
                 with self.subTest(method=method, colon=colon):
                     question = self.question(check={"method": method + colon + description, "result": "一致"})
@@ -670,12 +668,12 @@ class AccuracyTests(unittest.TestCase):
     def test_reference_check_requires_named_source_and_location(self):
         progress = self.progress(self.event())
         for method in ("对照教材原页／官方答案", "对照教材原页／官方答案：", "对照教材原页／官方答案：资料甲",
-                       "对照教材原页／官方答案：第2章", "对照教材原页／官方答案：资料甲，待定位"):
+                       "对照教材原页／官方答案：第2章", "对照教材原页／官方答案：资料甲, 待定位"):
             with self.subTest(method=method):
                 question = self.question(check={"method": method, "result": "一致"})
                 self.assertIn("REFERENCE_CHECK_LOCATION", self.codes(progress, [question]))
                 self.assertEqual(mastery_basis(progress, [question])["denominator"], 0)
-        for method in ("对照教材原页／官方答案：资料甲，第十二页", "对照教材原页／官方答案: Manual A, p.12",
+        for method in ("对照教材原页／官方答案：资料甲, 第十二页", "对照教材原页／官方答案: Manual A, p.12",
                        "对照教材原页／官方答案：资料甲.pdf#page=12"):
             with self.subTest(method=method):
                 question = self.question(check={"method": method, "result": "一致"})
@@ -689,7 +687,7 @@ class AccuracyTests(unittest.TestCase):
     def test_parsed_reference_requires_location_and_resolved_result(self):
         progress = self.progress(self.event())
         prefix = "对照教材解析正文"
-        for details in ("", "：", "：资料甲", "：第2章", "：资料甲，待定位"):
+        for details in ("", "：", "：资料甲", "：第2章", "：资料甲, 待定位"):
             with self.subTest(details=details):
                 question = self.question(check={"method": prefix + details, "result": "一致"})
                 self.assertFalse(independently_checked(question))
@@ -698,7 +696,7 @@ class AccuracyTests(unittest.TestCase):
         for result in ("一致", "待核对", "不一致"):
             with self.subTest(result=result):
                 question = self.question(check={
-                    "method": prefix + "：资料甲，第2章，materials/parsed/资料甲.md",
+                    "method": prefix + "：资料甲, 第2章, materials/parsed/资料甲.md",
                     "result": result,
                 })
                 self.assertNotIn("REFERENCE_CHECK_LOCATION", self.codes(progress, [question]))
@@ -715,7 +713,7 @@ class AccuracyTests(unittest.TestCase):
             report = validate(root, check_generated=False)
             self.assertTrue(report["ok"], report)
             self.assertEqual({item["code"] for item in report["accuracy_warnings"]}, {"REFERENCE_CHECK_LOCATION"})
-            question["independent_check"]["method"] += "，第2章"
+            question["independent_check"]["method"] += ", 第2章"
             write_json(root, "data/questions.json", {"items": [question]})
             self.assertEqual(validate(root, check_generated=False)["accuracy_warnings"], [])
 
@@ -778,7 +776,7 @@ class AccuracyTests(unittest.TestCase):
             plan["key_facts"].append({"basis": "推断", "location": "前提待核对"})
             self.assertIn("KEY_FACT_CONTENT", self.codes(progress, []))
             plan["key_facts"] = [{"content": "关键关系", "basis": "已对照教材原页", "location": "资料甲第2章"},
-                                  {"content": "未核对条件", "basis": "模型自己的知识，未核对", "location": "待定位"}]
+                                 {"content": "未核对条件", "basis": "模型自己的知识，未核对", "location": "待定位"}]
             plan["connections"][0]["limits"] = "仅结构相似，条件不同"
             self.assertEqual(self.codes(progress, []), set())
             write_json(root, "data/progress.json", progress)
@@ -809,7 +807,7 @@ class AccuracyTests(unittest.TestCase):
         questions[5]["adapted"] = True
         progress = self.progress(*(self.event(question["id"], [question["id"]]) for question in questions[:6]))
         progress["knowledge"][0]["evidence_history"] += [self.event("duplicate", ["self"]),
-                                                        self.event("practice", ["unchecked"], mode="练习")]
+                                                            self.event("practice", ["unchecked"], mode="练习")]
         result = mastery_basis(progress, questions)
         self.assertEqual(result["denominator"], 6)
         self.assertEqual(result["self_authored"], 2)
@@ -1149,8 +1147,8 @@ class DepthPlanTests(unittest.TestCase):
                 self.assertTrue(validate_depth_plan(course, progress))
 
     def test_full_project_render_and_validation_in_temporary_root(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
             initialize(root, "临时课程", "深度预算验证", "Asia/Shanghai")
             configured, planned = self.fixture()
             course = read_json(root, "data/course.json")
@@ -1173,6 +1171,95 @@ class DepthPlanTests(unittest.TestCase):
             self.assertTrue(report["ok"], report)
             self.assertEqual(before, {name: (root / name).read_bytes() for name in before})
 
+
+    def test_module_group_budget_reconciles_against_daily_plan_and_topic_ids(self):
+        course, progress = self.fixture()
+        course["planning"] = {"status": "active", "effective_date": "2026-10-16", "deadline_date": "2026-10-17", "deadline_basis": "用户选定"}
+        course["stages"] = [{"title": "阶段一", "goal": "入门", "status": "进行中", "planned_start": "2026-10-16", "planned_end": "2026-10-17"}]
+        course["modules"] = [{"id": "M1", "title": "基础", "topics": ["主题"], "status": "进行中", "planned_start": "2026-10-16", "planned_end": "2026-10-17"}]
+        course["daily_plan"] = [
+            {"date": "2026-10-16", "minutes": 30, "module_id": "M1", "focus": "核心", "outcome": "完成", "topic_ids": ["topic"]},
+            {"date": "2026-10-17", "minutes": 0, "module_id": None, "focus": "休息", "outcome": "无"},
+        ]
+        course["depth_policy"]["groups"][0]["module_id"] = "M1"
+        self.assertTrue(any("超过每日简纲可用分钟" in e for e in validate_depth_plan(course, progress)))
+        course["planning"]["capacity_issues"] = ["M1 预算超出 30 分钟，压缩扩展例"]
+        self.assertEqual(validate_depth_plan(course, progress), [])
+        course["daily_plan"][0]["topic_ids"] = ["missing_topic"]
+        self.assertTrue(any("topic_ids 包含无效主题" in e for e in validate_depth_plan(course, progress)))
+
+    def test_realtime_topic_quota_commit_aggregation_and_first_pass_seal(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            initialize(root, "配额闭环", "防卡在单个小目标", "Asia/Shanghai")
+            configured, planned = self.fixture("了解")
+            course = read_json(root, "data/course.json")
+            progress = read_json(root, "data/progress.json")
+            course.update(configured)
+            progress["next_session"].update(planned["next_session"])
+            write_json(root, "data/course.json", course)
+            write_json(root, "data/progress.json", progress)
+
+            cmd = lambda script, *args: subprocess.run(
+                [sys.executable, "-B", str(Path(__file__).with_name(script)), "--root", str(root), *args],
+                check=True, capture_output=True, text=True,
+            )
+            cmd("session_clock.py", "start", "--minutes", "30", "--reason", "用户明确30分钟", "--override-daily-budget")
+            res1 = json.loads(cmd("record.py", "log", "teach", "--knowledge", "topic", "--title", "主题一",
+                                  "--summary", "讲完主干", "--topic", "topic", "--phase", "first_pass").stdout)
+            self.assertTrue(res1["topic_quota"]["quota_reached"])
+            self.assertIn("已达到配额上限", res1["next_action"])
+            cmd("record.py", "log", "question", "--id", "q1", "--title", "题一", "--stem", "判断",
+                "--answer", "对", "--knowledge", "topic", "--check", "工具复算：核对|一致",
+                "--topic", "topic", "--phase", "first_pass")
+            cmd("record.py", "log", "answer", "--knowledge", "topic", "--question", "q1",
+                "--status", "未通过", "--summary", "概念混淆，保留缺口转出",
+                "--original", "错", "--grading-check", "工具复算：核对|对",
+                "--topic", "topic", "--phase", "first_pass", "--close-first-pass")
+            committed = json.loads(cmd("record.py", "commit").stdout)
+            self.assertGreater(committed["changes"], 0)
+            again = json.loads(cmd("record.py", "commit").stdout)
+            self.assertEqual(again["changes"], 0)
+
+            progress = read_json(root, "data/progress.json")
+            usage = progress["depth_usage"]["topic::first_pass"]
+            self.assertEqual(usage["totals"]["lectures"], 1)
+            self.assertEqual(usage["totals"]["exercises"], 1)
+            self.assertEqual(usage["totals"]["sessions"], 1)
+            self.assertTrue(usage["closed"])
+            self.assertTrue(progress["knowledge"][0]["first_pass_closed"])
+            self.assertEqual(validate_knowledge(root, progress["knowledge"]), [])
+
+            # Sealed first_pass cannot be scheduled as first_pass again
+            errors = validate_depth_plan(course, progress)
+            self.assertTrue(any("首轮主线已封口" in e for e in errors), errors)
+
+            # Unsealing for test: underreporting used_before is rejected
+            progress["depth_usage"]["topic::first_pass"]["closed"] = False
+            progress["knowledge"][0]["first_pass_closed"] = False
+            errors = validate_depth_plan(course, progress)
+            self.assertTrue(any("须填写 used_before" in e for e in errors), errors)
+            progress["next_session"]["depth_plan"]["items"][0]["used_before"] = {
+                "minutes": 0, "lectures": 0, "exercises": 0, "sessions": 0, "source": "records/class-log/test.jsonl"
+            }
+            errors = validate_depth_plan(course, progress)
+            self.assertTrue(any("used_before 低于已归档历史消耗" in e for e in errors), errors)
+
+    def test_schedule_warnings_for_overdue_module_and_review_backlog(self):
+        from validate import schedule_warnings
+        course = {
+            "planning": {"status": "active", "effective_date": "2026-10-10", "deadline_date": "2026-10-20", "deadline_basis": "考试日"},
+            "modules": [{"id": "M1", "title": "基础", "planned_start": "2026-10-10", "planned_end": "2026-10-15"}],
+            "daily_plan": [{"date": "2026-10-18", "minutes": 30, "module_id": "M1", "focus": "继续", "outcome": "完成"}],
+        }
+        progress = {
+            "current": {"module": "M1 基础"},
+            "review_queue": [{"title": f"待查{i}"} for i in range(3)],
+            "mistakes": [],
+        }
+        warnings = schedule_warnings(course, progress, START.date())
+        self.assertTrue(any("MODULE_OVERDUE" in w for w in warnings), warnings)
+        self.assertTrue(any("REVIEW_BACKLOG_HIGH" in w for w in warnings), warnings)
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

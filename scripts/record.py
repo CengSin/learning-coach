@@ -1,13 +1,14 @@
 """课中轻量记账：每轮一条命令追加课堂日志并核时，收尾时统一写回 progress/questions。
 
 日志 records/class-log/YYYY-MM-DD.jsonl 只追加、不改写，本身就是含用户原答的真实课堂记录；
-commit 按日志条目 ID 幂等合并，重复执行不会重复写入。
+commit 按日志条目 ID 幂等合并，重复执行不会重复写入，并自动聚合主题配额消耗。
 """
 import argparse
 import json
 from pathlib import Path
 
 from common import current_time, parse_time, project_path, read_json, write_json, write_text
+from depth import FIRST_FIELDS, level_limits, phase_limits, summarize_log_usage, topic_quota_status, usage_key
 from knowledge import DIMENSIONS, REVIEW_STATUSES
 
 LOG_DIRECTORY = "records/class-log"
@@ -43,6 +44,14 @@ def split_check(value, label):
 
 def build_entry(args, entry_id, at, session_id):
     entry = {"id": entry_id, "at": at.isoformat(), "session_id": session_id, "kind": args.kind}
+    if getattr(args, "topic", None):
+        entry["topic_id"] = args.topic
+        entry["depth_phase"] = getattr(args, "phase", None) or "first_pass"
+    elif getattr(args, "phase", None):
+        raise ValueError("指定 --phase 时必须同时指定 --topic")
+    if getattr(args, "close_first_pass", False):
+        entry["close_first_pass"] = True
+        entry["close_reason"] = (getattr(args, "close_reason", None) or "达到首轮目标或配额上限转出").strip()
     if args.kind == "question":
         check = split_check(args.check, "--check")
         if args.provenance in ("自编", None) and check is None:
@@ -74,19 +83,29 @@ def build_entry(args, entry_id, at, session_id):
     return {key: value for key, value in entry.items() if value is not None}
 
 
-def report_tick(root, course, session, at):
+def report_tick(root, course, session, at, *, progress=None, entries=None, topic_id=None, depth_phase=None):
     from session_clock import snapshot, timer_markdown
     if session.get("status") in ("running", "paused"):
         write_json(root, "data/session.json", session)
         write_text(root / "学习计时.md", timer_markdown(session, course["time_policy"]))
     info = snapshot(session, course["time_policy"], at)
     timing = {"phase": info["phase"], "end_mode": info["end_mode"],
-            "elapsed_seconds": info["elapsed_seconds"], "remaining_seconds": info["remaining_seconds"],
-            "elapsed_minutes": round(info["elapsed_seconds"] / 60, 1),
-            "remaining_minutes": round(info["remaining_seconds"] / 60, 1),
-            "next_action": info["next_action"]}
+              "elapsed_seconds": info["elapsed_seconds"], "remaining_seconds": info["remaining_seconds"],
+              "elapsed_minutes": round(info["elapsed_seconds"] / 60, 1),
+              "remaining_minutes": round(info["remaining_seconds"] / 60, 1),
+              "next_action": info["next_action"]}
     if "review" in info:
         timing["review"] = info["review"]
+    if topic_id and progress is not None and entries is not None:
+        quota = topic_quota_status(course, progress, entries, topic_id, depth_phase or "first_pass")
+        if quota is not None:
+            timing["topic_quota"] = quota
+            if quota["quota_reached"] and timing["phase"] == "learn":
+                timing["next_action"] = (
+                    f"当前小目标 {topic_id} 已达到配额上限（"
+                    + "、".join(quota["exceeded_fields"])
+                    + "），停止本主题新增讲练，收束当前题并保留缺口，同轮转入下一项已备内容。"
+                )
     return timing
 
 
@@ -129,8 +148,13 @@ def apply_entry(progress, questions, entry, source, day, period):
         return 1
     if kind == "teach":
         knowledge = find_knowledge(progress, entry["knowledge_id"], entry.get("title"), create=True)
-        return int(append_event(knowledge, {"id": entry["id"], "date": day, "dimension": "讲解", "status": "已讲解",
-                                            "summary": entry["summary"], "source": source}))
+        changed += int(append_event(knowledge, {"id": entry["id"], "date": day, "dimension": "讲解", "status": "已讲解",
+                                                "summary": entry["summary"], "source": source}))
+        if entry.get("close_first_pass") is True and knowledge.get("first_pass_closed") is not True:
+            knowledge["first_pass_closed"] = True
+            knowledge["first_pass_closed_reason"] = entry.get("close_reason") or "达到首轮目标或配额上限转出"
+            changed += 1
+        return changed
     knowledge = find_knowledge(progress, entry["knowledge_id"])
     if kind == "recall":
         gaps = entry["gaps"]
@@ -168,6 +192,63 @@ def apply_entry(progress, questions, entry, source, day, period):
     if review_status and knowledge.get("review_status") != review_status:
         knowledge["review_status"] = review_status
         changed += 1
+    if entry.get("close_first_pass") is True and knowledge.get("first_pass_closed") is not True:
+        knowledge["first_pass_closed"] = True
+        knowledge["first_pass_closed_reason"] = entry.get("close_reason") or "达到首轮目标或配额上限转出"
+        changed += 1
+    return changed
+
+
+def merge_depth_usage(course, progress, entries, source):
+    """按日志来源幂等聚合各 (topic_id, phase) 的真实消耗，并在首轮触达上限或显式封口时标记 closed。"""
+    summarized = summarize_log_usage(entries)
+    if not summarized:
+        return 0
+    policy = course.get("depth_policy") if isinstance(course, dict) else None
+    topics = {}
+    levels = None
+    if isinstance(policy, dict) and policy.get("enabled"):
+        topics = {t["id"]: t for t in policy.get("topics", []) if isinstance(t, dict) and t.get("id")}
+        levels = level_limits(policy)
+    usage = progress.setdefault("depth_usage", {})
+    changed = 0
+    for (topic_id, phase), stats in summarized.items():
+        key = usage_key(topic_id, phase)
+        record = usage.get(key)
+        snapshot_entry = {
+            "minutes": stats["minutes"],
+            "lectures": stats["lectures"],
+            "exercises": stats["exercises"],
+            "sessions": stats["sessions"],
+        }
+        if record is None:
+            record = {"topic_id": topic_id, "phase": phase, "by_source": {}, "totals": {}, "sources": []}
+            usage[key] = record
+            changed += 1
+        by_source = record.setdefault("by_source", {})
+        if by_source.get(source) != snapshot_entry:
+            by_source[source] = snapshot_entry
+            changed += 1
+        new_totals = {
+            "minutes": round(sum(item.get("minutes", 0) for item in by_source.values()), 1),
+            "lectures": int(sum(item.get("lectures", 0) for item in by_source.values())),
+            "exercises": int(sum(item.get("exercises", 0) for item in by_source.values())),
+            "sessions": int(sum(item.get("sessions", 0) for item in by_source.values())),
+        }
+        new_sources = sorted(by_source.keys())
+        if record.get("totals") != new_totals or record.get("sources") != new_sources:
+            record["totals"] = new_totals
+            record["sources"] = new_sources
+            changed += 1
+        if phase == "first_pass":
+            should_close = bool(stats.get("close_first_pass"))
+            if not should_close and topic_id in topics and levels is not None:
+                caps = phase_limits(topics[topic_id], "first_pass", levels)
+                if any(new_totals[field] >= caps[field] for field in FIRST_FIELDS):
+                    should_close = True
+            if should_close and record.get("closed") is not True:
+                record["closed"] = True
+                changed += 1
     return changed
 
 
@@ -180,6 +261,7 @@ def period_for(progress, day):
 
 def commit(root, day, at):
     entries = read_log(root, day)
+    course = read_json(root, "data/course.json", {})
     progress = read_json(root, "data/progress.json")
     questions = read_json(root, "data/questions.json", {"schema_version": 1, "items": []})
     source = log_path(day)
@@ -187,6 +269,7 @@ def commit(root, day, at):
     applied = 0
     for entry in entries:
         applied += apply_entry(progress, questions, entry, source, day, period)
+    applied += merge_depth_usage(course, progress, entries, source)
     if applied:
         progress["updated_at"] = at.isoformat()
         write_json(root, "data/questions.json", questions)
@@ -237,6 +320,11 @@ def main():
 
     for kind in (question, teach, answer, recall):
         kind.add_argument("--segment", choices=("mainline", "review"), help="本轮核时后即将进行的教学分段，省略沿用上一段")
+        kind.add_argument("--topic", help="关联 depth_policy 主题ID，用于实时核对单主题配额并在 commit 时自动聚合消耗")
+        kind.add_argument("--phase", choices=("first_pass", "practice"), help="主题所处阶段（需配合 --topic，默认 first_pass）")
+    for kind in (teach, answer, recall):
+        kind.add_argument("--close-first-pass", action="store_true", help="标记该知识点首轮主线封口，后续仅走 practice 复查配额")
+        kind.add_argument("--close-reason", help="首轮封口说明")
 
     done = actions.add_parser("commit", help="把课堂日志幂等合并进 progress/questions")
     done.add_argument("--date", help="YYYY-MM-DD，默认当前场次或今天")
@@ -258,7 +346,12 @@ def main():
             path.parent.mkdir(parents=True, exist_ok=True)
             with path.open("a", encoding="utf-8") as stream:
                 stream.write(json.dumps(entry, ensure_ascii=False) + "\n")
-            print(json.dumps({"logged": entry_id, **report_tick(root, course, session, at)}, ensure_ascii=False))
+            progress = read_json(root, "data/progress.json", {})
+            print(json.dumps({
+                "logged": entry_id,
+                **report_tick(root, course, session, at, progress=progress, entries=entries + [entry],
+                              topic_id=entry.get("topic_id"), depth_phase=entry.get("depth_phase")),
+            }, ensure_ascii=False))
         elif args.action == "commit":
             print(json.dumps(commit(root, args.date or day, at), ensure_ascii=False))
         else:

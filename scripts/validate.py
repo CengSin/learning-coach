@@ -9,7 +9,7 @@ from html.parser import HTMLParser
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
-from common import parse_time, project_path, read_json
+from common import current_time, parse_time, project_path, read_json
 from depth import validate_depth_plan
 from knowledge import accuracy_report, validate_knowledge
 from render import render_outputs
@@ -117,6 +117,44 @@ def validate_course_plan(course):
     return errors
 
 
+def schedule_warnings(course, progress, today):
+    """检查当前模块是否超期滞留以及复习队列积压是否挤压剩余学习容量。"""
+    warnings = []
+    planning = course.get("planning", {})
+    if planning.get("status") not in ("active", "provisional"):
+        return warnings
+    module_token = (progress.get("current", {}).get("module") or "").split(" ", 1)[0]
+    if module_token:
+        module = next((item for item in course.get("modules", []) if item.get("id") == module_token), None)
+        if module and module.get("planned_end") and not module.get("actual_mainline_end"):
+            try:
+                planned_end = date.fromisoformat(module["planned_end"])
+            except ValueError:
+                planned_end = None
+            if planned_end is not None and today > planned_end:
+                overdue = (today - planned_end).days
+                warnings.append(
+                    f"[MODULE_OVERDUE] 模块 {module_token} 已超过计划结束日 {planned_end.isoformat()}（超期 {overdue} 天）且未记录 actual_mainline_end，请推进主线或重排计划"
+                )
+    pending_reviews = len(progress.get("review_queue", [])) + sum(
+        1 for m in progress.get("mistakes", []) if m.get("review_status") not in ("已完成", None)
+    )
+    if pending_reviews > 0:
+        remaining_minutes = sum(
+            day.get("minutes", 0)
+            for day in course.get("daily_plan", [])
+            if isinstance(day, dict) and isinstance(day.get("date"), str)
+            and day["date"] >= today.isoformat()
+            and isinstance(day.get("minutes"), (int, float)) and not isinstance(day.get("minutes"), bool)
+        )
+        estimated_review_minutes = pending_reviews * 10
+        if remaining_minutes <= 0 or estimated_review_minutes > remaining_minutes * 0.5:
+            warnings.append(
+                f"[REVIEW_BACKLOG_HIGH] 待复查项共 {pending_reviews} 条（估算至少 {estimated_review_minutes} 分钟），相对剩余计划容量（{remaining_minutes:g} 分钟）占比过高，建议压缩非必要复查或重排"
+            )
+    return warnings
+
+
 def validate(root, check_generated=True, *, strict_materials=False, quick=False):
     root = Path(root).resolve()
     errors, warnings = [], []
@@ -130,6 +168,8 @@ def validate(root, check_generated=True, *, strict_materials=False, quick=False)
         errors.extend(validate_knowledge(root, progress.get("knowledge", [])))
         errors.extend(validate_course_plan(course))
         errors.extend(validate_depth_plan(course, progress))
+        today = current_time(course.get("timezone", "UTC")).date()
+        warnings.extend(schedule_warnings(course, progress, today))
         policy = course["time_policy"]
         if policy.get("end_mode", "windows") not in ("windows", "deadline"):
             errors.append("无效课程结束模式")
@@ -140,7 +180,7 @@ def validate(root, check_generated=True, *, strict_materials=False, quick=False)
         cycle = course.get("cycle", {})
         for value in ([cycle["review_weekday"]] if "review_weekday" in cycle else []) + cycle.get("planned_weekdays", []):
             if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 6:
-                errors.append("周期星期应为 0～6，周一为0")
+                errors.append("周期星期应为 0~6，周一为0")
         for period in progress.get("periods", []):
             start, end = date.fromisoformat(period["start"]), date.fromisoformat(period["end"])
             if end < start:
