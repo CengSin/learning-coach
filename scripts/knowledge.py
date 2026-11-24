@@ -32,13 +32,13 @@ def source_location_present(details):
         return False
     details = details.strip()
     position = (r"第\s*[\d一二三四五六七八九十百千零〇两IVXivx.]+\s*[章节页题]"
-                r"|(?:章节?|页码?|题目?|pages?|pp?\.?)\s*\d+(?:\.\d+)*|#page=\d+")
+                r"|(?:章节?|页码?|题目?|pages?|pp?\.)\s*\d+(?:\.\d+)*|#page=\d+")
     source = re.sub(position, "", details, flags=re.IGNORECASE)
     return bool(re.search(position, details, re.IGNORECASE) and re.search(r"[^\W\d_]", source))
 
 
 def reference_check_located(method):
-    parts = re.split("[：:]", method, maxsplit=1)
+    parts = re.split("[:：]", method, maxsplit=1)
     return len(parts) == 2 and parts[0].strip() in REFERENCE_CHECK_METHODS and source_location_present(parts[1])
 
 
@@ -46,7 +46,7 @@ def independently_checked(question):
     check = question.get("independent_check")
     if not isinstance(check, dict) or not isinstance(check.get("method"), str):
         return False
-    method = re.split("[：:]", check["method"], maxsplit=1)[0].strip()
+    method = re.split("[:：]", check["method"], maxsplit=1)[0].strip()
     valid_method = method in ("工具复算", "另一种解法")
     if check["method"].strip().startswith(REFERENCE_CHECK_METHODS):
         valid_method = reference_check_located(check["method"])
@@ -142,7 +142,7 @@ def mastery_basis(progress, questions):
         counts[question_kind(lookup[question_id])] += 1
     denominator = len(included)
     ratio = counts["self_authored"] / denominator if denominator else None
-    summary = (f"自编题 {counts['self_authored']}/{denominator}（{ratio:.1%}）；"
+    summary = (f"自编题 {counts['self_authored']}/{denominator} ({ratio:.1%})；"
                f"官方／真题 {counts['official_or_past']}，其他 {counts['other']}，未知 {counts['unknown']}"
                if denominator else "无可统计依据")
     return {"denominator": denominator, **counts, "self_authored_ratio": ratio, "summary": summary}
@@ -192,7 +192,7 @@ def accuracy_report(progress, questions):
         connections = []
     for index, connection in enumerate(connections):
         if not isinstance(connection, dict) or any(not isinstance(connection.get(key), str) or not connection[key].strip()
-                for key in ("prior_knowledge", "similarities", "limits")):
+                                                   for key in ("prior_knowledge", "similarities", "limits")):
             warn("CONNECTION_FIELDS", f"next_session.connections[{index}]", "知识关联须有既有知识、相同点和类比不成立之处")
     lookup = {question["id"]: question for question in questions}
     historical_events = historical_mistakes = historical_summaries = 0
@@ -244,7 +244,7 @@ def accuracy_report(progress, questions):
         if mode == "提示后作答" and record.get("status") in ("独立正确", "隔日正确", "迁移正确"):
             warn("ASSESSMENT_FIELDS", location, "提示后作答不能标为独立正确或独立保持／迁移")
         if mode == "闭卷复述" and (not isinstance(assessment.get("recall_gaps"), list)
-                or any(not isinstance(gap, str) or not gap.strip() for gap in assessment.get("recall_gaps", []))):
+                                or any(not isinstance(gap, str) or not gap.strip() for gap in assessment.get("recall_gaps", []))):
             warn("RECALL_GAPS", location, "闭卷复述仅记录遗漏／错误的关键事实，全对用空列表")
         ids = assessment.get("question_ids", [])
         if not isinstance(ids, list) or any(not isinstance(value, str) for value in ids):
@@ -276,6 +276,10 @@ def validate_knowledge(root, entries):
             errors.append(label + "请将旧状态和出处保留为 legacy_summary，新增验证写入 evidence_history")
         if entry.get("review_status") is not None and entry["review_status"] not in REVIEW_STATUSES:
             errors.append(label + "无效复查状态")
+        if "first_pass_closed" in entry and not isinstance(entry["first_pass_closed"], bool):
+            errors.append(label + "first_pass_closed 应为布尔值")
+        if "first_pass_closed_reason" in entry and (not isinstance(entry["first_pass_closed_reason"], str) or not entry["first_pass_closed_reason"].strip()):
+            errors.append(label + "first_pass_closed_reason 应为非空说明")
         history = entry.get("evidence_history", [])
         if entry.get("status") == "未学" and (history or entry.get("legacy_summary")):
             errors.append(label + "未学不能与学习证据或历史摘要并存")
